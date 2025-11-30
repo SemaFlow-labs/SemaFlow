@@ -1,0 +1,28 @@
+name: orders
+data_source: duckdb_local
+table: orders
+primary_key: id
+time_dimension: created_at
+dimensions:
+  id:
+    expression: id
+    description: Order primary key
+  customer_id:
+    expression: customer_id
+    description: Foreign key to customers
+  created_at:
+    expression: created_at
+    description: Order timestamp
+measures:
+  order_total:
+    expr: amount
+    agg: sum
+    description: Total order amount
+  order_count:
+    expr: id
+    agg: count
+    description: Count of orders
+  distinct_customers:
+    expr: customer_id
+    agg: count_distinct
+    description: Distinct customers ordering

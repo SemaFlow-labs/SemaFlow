@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SemanticTable {
     pub data_source: String,
     pub name: String,
@@ -40,6 +41,7 @@ impl<'de> Deserialize<'de> for Dimension {
             }),
             other => {
                 #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
                 struct Full {
                     expression: Expr,
                     data_type: Option<String>,
@@ -57,6 +59,7 @@ impl<'de> Deserialize<'de> for Dimension {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Measure {
     pub expr: Expr,
     pub agg: Aggregation,
@@ -200,22 +203,25 @@ pub enum TimeGrain {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SemanticModel {
+#[serde(deny_unknown_fields)]
+pub struct SemanticFlow {
     pub name: String,
-    pub base_table: ModelTableRef,
+    pub base_table: FlowTableRef,
     #[serde(default)]
-    pub joins: BTreeMap<String, ModelJoin>,
+    pub joins: BTreeMap<String, FlowJoin>,
     pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelTableRef {
+#[serde(deny_unknown_fields)]
+pub struct FlowTableRef {
     pub semantic_table: String,
     pub alias: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelJoin {
+#[serde(deny_unknown_fields)]
+pub struct FlowJoin {
     pub semantic_table: String,
     pub alias: String,
     pub to_table: String,
@@ -225,6 +231,7 @@ pub struct ModelJoin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JoinKey {
     pub left: String,
     pub right: String,
@@ -240,8 +247,9 @@ pub enum JoinType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct QueryRequest {
-    pub model: String,
+    pub flow: String,
     #[serde(default)]
     pub dimensions: Vec<String>,
     #[serde(default)]
@@ -255,6 +263,7 @@ pub struct QueryRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Filter {
     pub field: String,
     pub op: FilterOp,
@@ -262,20 +271,31 @@ pub struct Filter {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum FilterOp {
+    #[serde(rename = "==")]
     Eq,
+    #[serde(rename = "!=")]
     Neq,
+    #[serde(rename = ">")]
     Gt,
+    #[serde(rename = ">=")]
     Gte,
+    #[serde(rename = "<")]
     Lt,
+    #[serde(rename = "<=")]
     Lte,
+    #[serde(rename = "in")]
     In,
+    #[serde(rename = "not in")]
     NotIn,
+    #[serde(rename = "like")]
     Like,
+    #[serde(rename = "ilike")]
+    ILike,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderItem {
     pub column: String,
     pub direction: SortDirection,

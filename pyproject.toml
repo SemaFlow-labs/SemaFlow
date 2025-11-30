@@ -5,15 +5,21 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.23.0",
     "pyyaml>=6.0",
-    "duckdb>=0.10.2",
 ]
+
+[project.optional-dependencies]
+duckdb = ["duckdb>=0.10.2"]
+api = ["fastapi[standard]>=0.122.0", "uvicorn[standard]>=0.23.0"]
+bigquery = []
+postgres = []
 
 [dependency-groups]
 dev = [
     "maturin>=1.10.2",
+]
+api = [
+    "fastapi[standard]>=0.122.0",
 ]
 
 [build-system]
@@ -23,4 +29,5 @@ build-backend = "maturin"
 [tool.maturin]
 manifest-path = "semaflowrs/Cargo.toml"
 features = ["python"]
-python-source = "semaflow"
+python-source = "."
+python-packages = ["semaflow"]

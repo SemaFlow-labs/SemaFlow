@@ -1245,6 +1245,7 @@ dependencies = [
  "duckdb",
  "glob",
  "hex",
+ "once_cell",
  "pyo3",
  "serde",
  "serde_json",

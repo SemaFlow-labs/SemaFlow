@@ -3,17 +3,18 @@ End-to-end Python demo using the Rust core via PyO3 bindings.
 
 Steps:
 - seed a DuckDB file with sample data
-- load semantic tables/models from semaflowrs/examples/models
-- list models/dimensions/measures
-- build SQL for a request
+- load semantic tables/flows from examples/flows
+- list flows/dimensions/measures via FlowHandle
+- build SQL for a request (supports alias-qualified field names)
 - execute and print results
 """
 
+import asyncio
 from pathlib import Path
 
 import duckdb
 
-from semaflow import build_sql, load_models_from_dir, run_query
+from semaflow import DataSource, FlowHandle
 
 
 def seed_duckdb(db_path: Path) -> None:
@@ -46,56 +47,68 @@ def seed_duckdb(db_path: Path) -> None:
     conn.close()
 
 
-def main() -> None:
+async def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    model_root = project_root / "semaflowrs" / "examples" / "models"
+    flow_root = project_root / "examples" / "flows"
     db_path = project_root / "examples" / "demo_python.duckdb"
 
     seed_duckdb(db_path)
 
-    tables, models = load_models_from_dir(model_root)
-    data_sources = {"duckdb_local": str(db_path)}
-    table_map = {t["name"]: t for t in tables}
+    flow = FlowHandle.from_dir(flow_root, [DataSource.duckdb(str(db_path), name="duckdb_local")])
 
-    print("Models:")
-    for model in models:
-        print(f"- {model['name']}")
+    print("Flows:")
+    for m in flow.list_flows():
+        print(f"- {m.get('name')} ({m.get('description', '')})")
     print()
 
-    for model in models:
-        base = model["base_table"]["semantic_table"]
-        dims = list(table_map[base].get("dimensions", {}).keys())
-        measures = list(table_map[base].get("measures", {}).keys())
-        print(f"Model {model['name']}:")
-        print(f"  base_table: {base}")
-        print(f"  dimensions: {dims}")
-        print(f"  measures: {measures}")
-        for join_name, join in model.get("joins", {}).items():
-            jt = table_map[join["semantic_table"]]
-            jdims = list(jt.get("dimensions", {}).keys())
-            jmeasures = list(jt.get("measures", {}).keys())
-            print(f"  join {join_name}: dims={jdims}, measures={jmeasures}")
+    schema = flow.get_flow("sales")
+    print("Sales flow dimensions (qualified):")
+    for d in schema["dimensions"]:
+        print(f"- {d['qualified_name']}: {d.get('description', '')}")
+    print("Sales flow measures (qualified):")
+    for m in schema["measures"]:
+        print(f"- {m['qualified_name']}: {m.get('description', '')}")
+    print(f"time_dimension: {schema.get('time_dimension')}")
     print()
 
     request = {
-        "model": "sales",
-        "dimensions": ["country"],
-        "measures": ["order_total", "distinct_customers"],
+        "flow": "sales",
+        "dimensions": ["c.country"],
+        "measures": ["o.order_total", "c.customer_count"],
         "filters": [],
-        "order": [{"column": "order_total", "direction": "desc"}],
+        "order": [{"column": "o.order_total", "direction": "desc"}],
         "limit": 10,
     }
 
-    sql = build_sql(tables, models, data_sources, request)
+    sql = await flow.build_sql(request)
     print("SQL:")
     print(sql)
     print()
 
-    rows = run_query(tables, models, data_sources, request)
+    rows = await flow.execute(request)
+    print("Results:")
+    for row in rows:
+        print(row)
+
+    request = {
+        "flow": "sales",
+        "dimensions": ["c.country"],
+        "measures": ["o.order_total", "c.customer_count"],
+        "filters": [{"field": "c.country", "op": "==", "value": "US"}],
+        "order": [{"column": "o.order_total", "direction": "desc"}],
+        "limit": 10,
+    }
+
+    sql = await flow.build_sql(request)
+    print("SQL:")
+    print(sql)
+    print()
+
+    rows = await flow.execute(request)
     print("Results:")
     for row in rows:
         print(row)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,106 +1,166 @@
 # SemaFlow
 
-Semantic layer core in Rust with Python bindings. Defines semantic tables and models, validates them against backends, builds SQL (currently DuckDB), and can execute queries. Everything IO-bound is async.
+Rust-first semantic layer with Python bindings. Define semantic tables/flows, validate against backends, build SQL (AST + dialect), and execute asynchronously. Python stays thin; Rust does the heavy lifting.
 
-## Architecture at a Glance
+## Quickstart (Python)
 
-- **Build/Definition**
-  - Data sources: logical connections (DuckDB now; Postgres/BigQuery later).
-  - Semantic tables: `name`, `data_source`, `table`, `primary_key`, `time_dimension`, dimensions, measures (Expr DSL), join keys, descriptions.
-  - Semantic models: base table + joins to other semantic tables; optional always-filters.
-  - Models dictionary: map of model name → semantic model; loaded from YAML or Python.
-- **Startup/Deploy**
-  - Load models dictionary into memory.
-  - Initialize data source connections.
-  - Retrieve table schemas from backends (schema cache keyed by `(data_source, table)`).
-  - Validate semantic tables (fields, PK, time dimension, measure expressions).
-  - Validate semantic models (join keys/types, single data source per model); fail or warn per config.
-  - Expose API surface (planned): `/health`, `/list_models`, `/get_model`, `/{model}/query_model`.
-- **Query/Runtime**
-  - Request parsed into `QueryRequest` (dims, measures, filters, order, limit/offset).
-  - Apply model always-filters; resolve joins from the graph.
-  - Build internal `QueryPlan` (select/from/joins/where/group/order).
-  - Compile to SQL via dialect (`DuckDbDialect` implemented).
-  - Execute against backend executor; return rows as JSON-friendly structures.
-- **Async**
-  - Schema fetch and query execution are async; Python/Rust call paths are async-safe.
-
-## Detailed Flow (Mermaid)
-
-### Build / Definition phase
-```mermaid
-flowchart TD
-  A[Start: User begins setup] --> B[Define Data Source Connections]
-  B --> C{Define Semantic Tables<br/>(YAML or Python)}
-  C --> C1[Set: table, primary key,<br/>dimensions, measures,<br/>time grain, descriptions]
-  C --> C2[Reference a data source]
-  C --> D{Define Semantic Models}
-  D --> D1[Choose base Semantic Table]
-  D --> D2[Add joins to other STs]
-  D --> D3[Optional: set always filters]
-  D --> E[Assemble Models Dictionary]
-  E --> F[Expose models dictionary to API builder]
-  F --> G[End of Build Phase]
+Install (DuckDB + FastAPI helpers):
+```
+uv add "semaflow[duckdb,api]"
 ```
 
-### Startup / Deploy phase
-```mermaid
-flowchart TD
-  A[API Starts] --> B[Load Models Dictionary into Memory]
-  B --> C[Initialize Data Source Connections]
-  C --> D[Retrieve Table Schemas from Backends]
-  D --> E{Validate Semantic Tables}
-  E --> E1[Check fields exist]
-  E --> E2[Check primary key + time dimension]
-  E --> E3[Validate measure expressions]
-  E --> F{Validate Semantic Models}
-  F --> F1[Verify join keys and types]
-  F --> F2[Apply config: fail or warn]
-  F --> G{Any Validation Failures?}
-  G -->|Yes| H[Startup Error / Abort]
-  G -->|No| I[API Marked Live]
-  I --> J[Expose Endpoints:<br/>/health,<br/>/list_models,<br/>/get_model,<br/>/{model}/query_model]
-  J --> K[Ready for Queries]
+```python
+import asyncio
+from pathlib import Path
+from semaflow import DataSource, FlowHandle
+from semaflow.api import create_app
+
+ds = DataSource.duckdb("examples/demo_python.duckdb", name="duckdb_local")
+flow = FlowHandle.from_dir(
+    Path("examples/flows"), [ds], description="Demo sales semantic flow"
+)
+print(flow.list_flows())           # names + descriptions
+schema = flow.get_flow("sales")    # dimensions/measures with qualified names + time metadata
+
+# Note: FlowHandle.from_dir looks for `tables/` and `flows/` subfolders when present;
+# if those are absent it will read any YAML files directly under the provided path.
+
+request = {
+    "flow": "sales",
+    "dimensions": ["c.country"],
+    "measures": ["o.order_total", "c.customer_count"],
+    "order": [{"column": "o.order_total", "direction": "desc"}],
+    "limit": 10,
+}
+
+async def demo():
+    sql = await flow.build_sql(request)
+    rows = await flow.execute(request)
+    print(sql, rows)
+
+asyncio.run(demo())
+
+app = create_app(flow)  # FastAPI app with /flows, /flows/{flow}, /flows/{flow}/query
+assert flow.get_flow("sales")  # handle contains the flow matching its key
 ```
 
-### Query / Runtime phase
-```mermaid
-flowchart TD
-  A[POST /{model}/query_model] --> B[Lookup Semantic Model]
-  B --> C{Model Found?}
-  C -->|No| Z[Return 404]
-  C -->|Yes| D[Parse Request JSON into QueryRequest]
-  D --> E[Validate fields against Model:<br/>dims, measures, filters]
-  E --> F[Apply Always Filters]
-  F --> G[Resolve Required Joins]
-  G --> H[Build Internal QueryPlan:<br/>select, from, joins,<br/>where, group_by]
-  H --> I[Compile QueryPlan to SQL<br/>(current: DuckDB dialect)]
-  I --> J[Execute SQL Async Against Backend]
-  J --> K[Receive Results]
-  K --> L[Serialize to JSON]
-  L --> M[Return HTTP 200 Response]
-```
+- Or build everything in Python (no YAML) with `SemanticFlow` / `SemanticTable` classes; see `examples/python_objects_demo.py`.
+
+## Architecture
+
+See `ARCHITECTURE.md` for the full vision. Highlights:
+- Rust core owns semantic state; Python holds handles only.
+- `BackendConnection` + `ConnectionManager` pick dialect and execute; DuckDB implemented with concurrency limiter.
+- SQL AST + `Dialect` renderer (DuckDB implemented). Alias-qualified field names (`alias.field`) are accepted.
+- Validation uses schema cache; enforces columns/PK/time dimension/join keys/single data source per flow.
+- Python bindings release the GIL and share a tokio runtime; FastAPI helper layers sit on top.
 
 ## Components
+- **Expr DSL**: columns, literals, CASE, binary ops, common functions, aggregations.
+- **SQL builder**: `SqlBuilder::build_for_request` → SQL AST → dialect render.
+- **Runtime**: `run_query` executes via backend connection with backpressure (DuckDB semaphore now).
+- **Python**: `SemanticFlow` definitions (built from `SemanticTable`, `Dimension`, `Measure` classes) plus `FlowHandle` (async build_sql/execute + list_flows/get_flow), `FastAPIBridge`/`semaflow.api` helpers.
+- **Introspection**: `list_flow_summaries`/`flow_schema` surface qualified dimensions/measures with descriptions/time metadata (joins stay internal).
 
-- **Expr DSL**: columns, literals, CASE, binary ops, functions (date_trunc/part, lower/upper, coalesce/ifnull, now, concat/concat_ws, substring, length, greatest/least, trim/ltrim/rtrim, cast), aggregations (sum, count, count_distinct, min, max, avg).
-- **SQL builder**: `SqlBuilder::build_for_request` renders a `QueryRequest` to SQL with dialect support (DuckDB now).
-- **Validation**: schema checks; join alias uniqueness; join key existence; enforce single data source per model.
-- **Runtime**: `run_query` builds SQL and dispatches to the registered executor for the model’s data source; DuckDB executor included.
-- **Examples**: semantic definitions in `examples/models`, requests in `examples/requests`, shell helper `examples/run_print_sql.sh`, Rust demo `cargo run --example run_query`, Python demo `examples/python_demo.py`.
-- **Python bindings** (feature `python`): PyO3 module `semaflow_core` exposes `build_sql` and `run` (validate + build + execute DuckDB). Wrapper package `semaflow` re-exports `build_sql`, `run_query`, and `load_models_from_dir` with type hints/docstrings.
+## Python API Modes
+
+- Define tables with classes for autocomplete/type safety:
+  ```python
+  ds = DataSource.duckdb("examples/demo_python.duckdb", name="duckdb_local")
+  orders = SemanticTable(
+      name="orders",
+      data_source=ds,
+      table="orders",
+      primary_key="id",
+      dimensions={
+          "id": Dimension("id", description="Order primary key"),
+          "customer_id": Dimension("customer_id", description="FK to customers"),
+      },
+      measures={
+          "order_total": Measure("amount", "sum", description="Total order amount"),
+      },
+  )
+  customers = SemanticTable(
+      name="customers",
+      data_source=ds,
+      table="customers",
+      primary_key="id",
+      dimensions={
+          "id": Dimension("id", description="Customer primary key"),
+          "country": Dimension("country", description="Customer country"),
+      },
+      measures={"customer_count": Measure("id", "count", description="Count of customers")},
+  )
+  sales_flow = SemanticFlow(
+      name="sales",
+      base_table=orders,
+      base_table_alias="o",
+      joins=[
+          FlowJoin(
+              semantic_table=customers,
+              alias="c",
+              to_table="o",
+              join_type="left",
+              join_keys=[JoinKey("customer_id", "id")],
+          )
+      ],
+      description="Sales data for the company",
+  )
+  flow = build_flow_handles({"sales": sales_flow})
+  sql = await flow.build_sql({"flow": "sales", "dimensions": ["c.country"], "measures": ["o.order_total"]})
+  rows = await flow.execute({"flow": "sales", "dimensions": ["c.country"], "measures": ["o.order_total"]})
+  ```
+- `semaflow.api.create_app` accepts either a `FlowHandle` or a dict of flow definitions (`{"sales": sales_flow}`). It builds/validates handles internally so API routes can call `build_flow_handles` automatically. Example in `examples/semantic_api.py`.
+- Use the top-level helper only for one-offs: `from semaflow import build_sql, run` (Python module). These re-parse tables/flows/data_sources every call, which is convenient for ad hoc use but not for per-request server code.
+
+## Semantic Layer Reference
+
+**Semantic tables (`tables/*.yaml`)**
+| Field | Expected values | Example |
+| --- | --- | --- |
+| `name`, `data_source`, `table`, `primary_key` | Required; `data_source` must match a registered connection name. | `duckdb_local` |
+| `time_dimension`, `smallest_time_grain` | Optional; grain is one of `day`, `week`, `month`, `quarter`, `year`. | `created_at`, `month` |
+| `dimensions.<name>` | Either a column string (`"country"`) or object `{expression, data_type?, description?}`. | `country` or a lower() func |
+| `measures.<name>.expr` | Column/expression; `agg` required (`sum`, `count`, `count_distinct`, `min`, `max`, `avg`). | `amount` + `agg: sum` |
+
+**Semantic flows (`flows/*.yaml`)**
+| Field | Expected values | Example |
+| --- | --- | --- |
+| `name` | Unique flow name. | `sales` |
+| `base_table` | `{semantic_table, alias}` pointing at a table file. | `orders` as alias `o` |
+| `joins.<alias>` | `{semantic_table, alias, to_table, join_type, join_keys[]}`; `join_type` in `inner|left|right|full`; `join_keys` are `{left,right}` column names on the referenced aliases. | join customers `c` to `o` |
+
+**Query requests (Python/FastAPI)**
+| Field | Expected values | Example |
+| --- | --- | --- |
+| `flow` | Flow name. | `sales` |
+| `dimensions`, `measures` | Lists of field names; may be qualified (`alias.field`). | `["c.country"]` |
+| `filters` | Row-level only; list of `{field, op, value}` where `field` is a dimension. | `{"field": "c.country", "op": "in", "value": ["US","CA"]}` |
+| `order` | `{column, direction}`; `direction` is `asc`/`desc`. | `{"column": "o.order_total", "direction": "desc"}` |
+| `limit`, `offset` | Optional pagination integers. | `limit: 100` |
+
+**Operators for expressions/filters**
+| Context | Allowed values | Example |
+| --- | --- | --- |
+| Filters `op` | `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not in`, `like`, `ilike`. | `{"op": "==", "value": "US"}` |
+| Measure `agg` | `sum`, `count`, `count_distinct`, `min`, `max`, `avg`. | `agg: count_distinct` |
+| Binary expressions | `add`, `subtract`, `multiply`, `divide`, `modulo` (`type: binary`). | `{"type":"binary","op":"add","left":"gross","right":"tax"}` |
+| Functions | `date_trunc(grain)`, `date_part(field)`, `lower`, `upper`, `coalesce`, `if_null`, `now`, `concat`, `concat_ws(sep)`, `substring`, `length`, `greatest`, `least`, `cast(data_type)`, `trim/ltrim/rtrim`. | `type: func`, `func: {date_trunc: month}`, `args: ["created_at"]` |
 
 ## Development
+- Tests: `cargo test` (Rust). Python feature build: `maturin develop -m semaflowrs/Cargo.toml -F python`.
+- First-time build with `uv`: `uv` will try to build the project (and compile bundled DuckDB) before running anything, which takes a few minutes and shows `Preparing packages...`. To avoid repeated rebuilds:
+  1) `uv venv && source .venv/bin/activate`
+  2) `uv pip install maturin`
+  3) `maturin develop -m semaflowrs/Cargo.toml -F python --locked`
+  4) When running later commands, use `uv run --no-sync ...` to skip the automatic rebuild.
+- Examples:
+  - Python demo (YAML): `uv run --no-sync python examples/python_demo.py`
+  - Python demo (pure objects): `uv run --no-sync python examples/python_objects_demo.py`
+  - FastAPI: `uv run --no-sync python examples/semantic_api.py` then use `/flows`, `/flows/{flow}`, `/flows/{flow}/query`
 
-- Tests: run `cargo test` from `semaflowrs/`.
-  - Unit-style cases: `semaflowrs/tests/unit/`.
-  - Integration/system cases: `semaflowrs/tests/integration/`.
-  - Entry shims `tests/unit.rs` and `tests/integration.rs` keep Cargo’s discovery happy.
-  - Filtering: `cargo test --lib` (unit-ish), `cargo test --tests` (all integration), or `cargo test --test duckdb_poc` for a specific integration file.
-- Python: `uv run maturin develop -m semaflowrs/Cargo.toml -F python` to build editable bindings (ensure venv active).
-
-## Running examples
-
-- Print SQL from a request: `cargo run --example print_sql -- examples/models examples/requests/sales_country.json`.
-- Full DuckDB round-trip: `cargo run --example run_query`.
-- Python demo (after `maturin develop`): `uv run python examples/python_demo.py`.
+## Roadmap (short)
+- Add dialects/backends (Postgres/BigQuery/Snowflake/Trino).
+- Planner: join pruning, grain inference, subquery handling.
+- Per-backend pooling/backpressure knobs; optional result caching.
+- Harden Python async surface and packaging for extras per backend.

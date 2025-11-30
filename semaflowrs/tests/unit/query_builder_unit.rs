@@ -1,13 +1,13 @@
-use semaflow_core::dialect::DuckDbDialect;
-use semaflow_core::models::{
-    Aggregation, Expr, Function, ModelJoin, ModelTableRef, QueryRequest, SemanticModel,
-    SemanticTable, TimeGrain,
+use semaflow::dialect::DuckDbDialect;
+use semaflow::flows::{
+    Aggregation, Expr, Function, FlowJoin, FlowTableRef, QueryRequest, SemanticFlow, SemanticTable,
+    TimeGrain,
 };
-use semaflow_core::query_builder::SqlBuilder;
-use semaflow_core::registry::ModelRegistry;
-use semaflow_core::SemaflowError;
+use semaflow::query_builder::SqlBuilder;
+use semaflow::registry::FlowRegistry;
+use semaflow::SemaflowError;
 
-fn inline_registry() -> ModelRegistry {
+fn inline_registry() -> FlowRegistry {
     let table = SemanticTable {
         data_source: "ds1".to_string(),
         name: "orders".to_string(),
@@ -18,7 +18,7 @@ fn inline_registry() -> ModelRegistry {
         dimensions: [
             (
                 "country".to_string(),
-                semaflow_core::models::Dimension {
+                semaflow::flows::Dimension {
                     expression: Expr::Column {
                         column: "country".to_string(),
                     },
@@ -28,7 +28,7 @@ fn inline_registry() -> ModelRegistry {
             ),
             (
                 "month".to_string(),
-                semaflow_core::models::Dimension {
+                semaflow::flows::Dimension {
                     expression: Expr::Func {
                         func: Function::DateTrunc(TimeGrain::Month),
                         args: vec![Expr::Column {
@@ -45,7 +45,7 @@ fn inline_registry() -> ModelRegistry {
         measures: [
             (
                 "order_total".to_string(),
-                semaflow_core::models::Measure {
+                semaflow::flows::Measure {
                     expr: Expr::Column {
                         column: "amount".to_string(),
                     },
@@ -56,7 +56,7 @@ fn inline_registry() -> ModelRegistry {
             ),
             (
                 "distinct_customers".to_string(),
-                semaflow_core::models::Measure {
+                semaflow::flows::Measure {
                     expr: Expr::Column {
                         column: "customer_id".to_string(),
                     },
@@ -71,24 +71,24 @@ fn inline_registry() -> ModelRegistry {
         description: None,
     };
 
-    let model = SemanticModel {
+    let flow = SemanticFlow {
         name: "sales".to_string(),
-        base_table: ModelTableRef {
+        base_table: FlowTableRef {
             semantic_table: "orders".to_string(),
             alias: "o".to_string(),
         },
-        joins: std::collections::BTreeMap::<String, ModelJoin>::new(),
+        joins: std::collections::BTreeMap::<String, FlowJoin>::new(),
         description: None,
     };
 
-    ModelRegistry::from_parts(vec![table], vec![model])
+    FlowRegistry::from_parts(vec![table], vec![flow])
 }
 
 #[test]
 fn build_with_functions_and_distinct() {
     let registry = inline_registry();
     let request = QueryRequest {
-        model: "sales".to_string(),
+        flow: "sales".to_string(),
         dimensions: vec!["month".to_string()],
         measures: vec!["distinct_customers".to_string()],
         filters: vec![],
@@ -108,12 +108,12 @@ fn build_with_functions_and_distinct() {
 fn measure_filters_rejected() {
     let registry = inline_registry();
     let request = QueryRequest {
-        model: "sales".to_string(),
+        flow: "sales".to_string(),
         dimensions: vec!["country".to_string()],
         measures: vec!["order_total".to_string()],
-        filters: vec![semaflow_core::models::Filter {
+        filters: vec![semaflow::flows::Filter {
             field: "order_total".to_string(),
-            op: semaflow_core::models::FilterOp::Eq,
+            op: semaflow::flows::FilterOp::Eq,
             value: serde_json::json!(1),
         }],
         order: vec![],
@@ -126,6 +126,83 @@ fn measure_filters_rejected() {
     match err {
         SemaflowError::Validation(msg) => {
             assert!(msg.contains("filters on measures"));
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+}
+
+#[test]
+fn unqualified_fields_error_when_ambiguous() {
+    let mut registry = inline_registry();
+    // Add a joined table that shares a dimension name to force ambiguity.
+    let customers = SemanticTable {
+        data_source: "ds1".to_string(),
+        name: "customers".to_string(),
+        table: "customers".to_string(),
+        primary_key: "id".to_string(),
+        time_dimension: None,
+        smallest_time_grain: None,
+        dimensions: [(
+            "country".to_string(),
+            semaflow::flows::Dimension {
+                expression: Expr::Column {
+                    column: "country".to_string(),
+                },
+                data_type: None,
+                description: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        measures: Default::default(),
+        description: None,
+    };
+
+    let flow = semaflow::flows::SemanticFlow {
+        name: "sales".to_string(),
+        base_table: FlowTableRef {
+            semantic_table: "orders".to_string(),
+            alias: "o".to_string(),
+        },
+        joins: [(
+            "customers".to_string(),
+            FlowJoin {
+                semantic_table: "customers".to_string(),
+                alias: "c".to_string(),
+                to_table: "o".to_string(),
+                join_type: semaflow::flows::JoinType::Left,
+                join_keys: vec![semaflow::flows::JoinKey {
+                    left: "id".to_string(),
+                    right: "id".to_string(),
+                }],
+                description: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        description: None,
+    };
+
+    registry.tables.insert(customers.name.clone(), customers);
+    registry.flows.insert(flow.name.clone(), flow);
+
+    let request = QueryRequest {
+        flow: "sales".to_string(),
+        dimensions: vec!["country".to_string()],
+        measures: vec![],
+        filters: vec![],
+        order: vec![],
+        limit: None,
+        offset: None,
+    };
+    let err = SqlBuilder::default()
+        .build_with_dialect(&registry, &request, &DuckDbDialect)
+        .unwrap_err();
+    match err {
+        SemaflowError::Validation(msg) => {
+            assert!(msg.contains("ambiguous"));
+            assert!(msg.contains("o"));
+            assert!(msg.contains("c"));
         }
         other => panic!("unexpected error {other:?}"),
     }

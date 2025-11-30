@@ -1,52 +1,61 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use crate::data_sources::DataSourceRegistry;
+use anyhow::anyhow;
+
+use crate::data_sources::ConnectionManager;
 use crate::error::{Result, SemaflowError};
-use crate::models::{Expr, SemanticModel, SemanticTable};
-use crate::registry::ModelRegistry;
+use crate::flows::{Expr, SemanticFlow, SemanticTable};
+use crate::registry::FlowRegistry;
 use crate::schema_cache::{SchemaCache, TableSchema};
 
 pub struct Validator {
-    data_sources: DataSourceRegistry,
+    connections: ConnectionManager,
     cache: Mutex<SchemaCache>,
     warn_only: bool,
 }
 
 impl Validator {
-    pub fn new(data_sources: DataSourceRegistry, warn_only: bool) -> Self {
+    pub fn new(connections: ConnectionManager, warn_only: bool) -> Self {
         Self {
-            data_sources,
+            connections,
             cache: Mutex::new(SchemaCache::new()),
             warn_only,
         }
     }
 
-    pub async fn validate_registry(&self, registry: &mut ModelRegistry) -> Result<()> {
+    pub async fn validate_registry(&self, registry: &mut FlowRegistry) -> Result<()> {
         for table in registry.tables.values() {
             let schema = self.ensure_schema(&table.data_source, &table.table).await?;
             self.validate_table(table, schema)?;
         }
 
-        for model in registry.models.values() {
-            self.validate_model(model, registry)?;
+        for flow in registry.flows.values() {
+            self.validate_flow(flow, registry)?;
         }
 
         Ok(())
     }
 
     async fn ensure_schema(&self, data_source: &str, table: &str) -> Result<TableSchema> {
-        if let Some(schema) = self.cache.lock().unwrap().get(data_source, table).cloned() {
+        if let Some(schema) = self
+            .cache
+            .lock()
+            .map_err(|e| SemaflowError::Other(anyhow!("schema cache lock: {e}")))?
+            .get(data_source, table)
+            .cloned()
+        {
             return Ok(schema);
         }
         let provider = self
-            .data_sources
+            .connections
             .get(data_source)
-            .ok_or_else(|| SemaflowError::Validation(format!("unknown data source {data_source}")))?
-            .executor
-            .clone();
+            .ok_or_else(|| SemaflowError::Validation(format!("unknown data source {data_source}")))?;
         let schema = provider.fetch_schema(table).await?;
-        self.cache.lock().unwrap().insert(
+        self.cache
+            .lock()
+            .map_err(|e| SemaflowError::Other(anyhow!("schema cache lock: {e}")))?
+            .insert(
             data_source.to_string(),
             table.to_string(),
             schema.clone(),
@@ -93,24 +102,24 @@ impl Validator {
         Ok(())
     }
 
-    fn validate_model(&self, model: &SemanticModel, registry: &ModelRegistry) -> Result<()> {
+    fn validate_flow(&self, flow: &SemanticFlow, registry: &FlowRegistry) -> Result<()> {
         let base_table = registry
-            .get_table(&model.base_table.semantic_table)
+            .get_table(&flow.base_table.semantic_table)
             .ok_or_else(|| {
                 SemaflowError::Validation(format!(
-                    "model {} base table {} not found",
-                    model.name, model.base_table.semantic_table
+                    "flow {} base table {} not found",
+                    flow.name, flow.base_table.semantic_table
                 ))
             })?;
 
         let base_ds = &base_table.data_source;
 
         let mut aliases = HashSet::new();
-        aliases.insert(model.base_table.alias.clone());
+        aliases.insert(flow.base_table.alias.clone());
         let mut alias_to_table = std::collections::HashMap::new();
-        alias_to_table.insert(model.base_table.alias.clone(), base_table);
+        alias_to_table.insert(flow.base_table.alias.clone(), base_table);
 
-        for (join_name, join) in &model.joins {
+        for (join_name, join) in &flow.joins {
             self.check(
                 aliases.insert(join.alias.clone()),
                 format!("duplicate alias {} in join {join_name}", join.alias),
@@ -138,7 +147,7 @@ impl Validator {
             alias_to_table.insert(join.alias.clone(), join_table);
         }
 
-        for (join_name, join) in &model.joins {
+        for (join_name, join) in &flow.joins {
             self.check(
                 !join.join_keys.is_empty(),
                 format!("join {join_name} must include at least one join key"),

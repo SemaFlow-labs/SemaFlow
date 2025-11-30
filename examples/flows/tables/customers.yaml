@@ -1,0 +1,16 @@
+name: customers
+data_source: duckdb_local
+table: customers
+primary_key: id
+dimensions:
+  id:
+    expression: id
+    description: Customer primary key
+  country:
+    expression: country
+    description: Customer country
+measures:
+  customer_count:
+    expr: id
+    agg: count
+    description: Count of customers

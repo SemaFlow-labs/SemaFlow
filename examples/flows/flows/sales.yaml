@@ -1,4 +1,5 @@
 name: sales
+description: Sales data for the company
 base_table:
   semantic_table: orders
   alias: o

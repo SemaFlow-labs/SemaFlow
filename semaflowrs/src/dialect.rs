@@ -1,4 +1,4 @@
-use crate::models::{Function, TimeGrain};
+use crate::flows::{Aggregation, Function, TimeGrain};
 
 /// Dialects render identifiers and primitive expression pieces.
 /// Expression tree walking lives in the query builder; the dialect
@@ -9,6 +9,16 @@ pub trait Dialect {
         "?".to_string()
     }
     fn render_function(&self, func: &Function, args: Vec<String>) -> String;
+    fn render_aggregation(&self, agg: &Aggregation, expr: &str) -> String {
+        match agg {
+            Aggregation::Sum => format!("SUM({expr})"),
+            Aggregation::Count => format!("COUNT({expr})"),
+            Aggregation::CountDistinct => format!("COUNT(DISTINCT {expr})"),
+            Aggregation::Min => format!("MIN({expr})"),
+            Aggregation::Max => format!("MAX({expr})"),
+            Aggregation::Avg => format!("AVG({expr})"),
+        }
+    }
     fn render_literal(&self, value: &serde_json::Value) -> String {
         match value {
             serde_json::Value::Null => "NULL".to_string(),

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "semaflow_core"
+name = "semaflow"
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
@@ -21,6 +21,7 @@ thiserror = "1.0"
 tokio = { workspace = true }
 tempfile = "3.10"
 pyo3 = { version = "0.21", optional = true }
+once_cell = "1.19"
 
 [features]
 python = ["pyo3/extension-module", "pyo3/macros"]
