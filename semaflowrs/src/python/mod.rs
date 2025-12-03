@@ -18,10 +18,23 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
+use tracing_subscriber::{fmt, EnvFilter};
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
     RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("create tokio runtime"))
+}
+
+fn init_tracing() {
+    static TRACING: OnceCell<()> = OnceCell::new();
+    TRACING.get_or_init(|| {
+        // Safe to ignore error if a subscriber is already set elsewhere.
+        let _ = fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_target(false)
+            .try_init();
+    });
 }
 
 fn py_err<E: std::fmt::Display>(msg: E) -> PyErr {
@@ -493,14 +506,21 @@ fn build_sql(
     data_sources: &Bound<'_, PyAny>,
     request: &Bound<'_, PyAny>,
 ) -> PyResult<String> {
+    let start = Instant::now();
     let tables = parse_tables(py, tables)?;
     let flows = parse_flows(flows)?;
     let request = parse_request(py, request)?;
     let registry = build_registry(tables, flows);
     let ds = build_data_sources(data_sources)?;
     let builder = SqlBuilder::default();
-    py.allow_threads(|| builder.build_for_request(&registry, &ds, &request))
-        .map_err(to_validation_err)
+    let sql =
+        py.allow_threads(|| builder.build_for_request(&registry, &ds, &request))
+            .map_err(to_validation_err)?;
+    tracing::debug!(
+        ms = start.elapsed().as_millis(),
+        "build_sql (pyfunction) complete"
+    );
+    Ok(sql)
 }
 
 #[pyfunction]
@@ -513,6 +533,7 @@ fn run(
     data_sources: &Bound<'_, PyAny>,
     request: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
+    let start = Instant::now();
     let tables = parse_tables(py, tables)?;
     let flows = parse_flows(flows)?;
     let request = parse_request(py, request)?;
@@ -534,12 +555,17 @@ fn run(
 
     let json = py.import_bound("json")?;
     let py_obj = json.call_method1("loads", (rows_json,))?;
+    tracing::debug!(
+        ms = start.elapsed().as_millis(),
+        "run (pyfunction) complete"
+    );
     Ok(py_obj.into_py(py))
 }
 
 /// PyO3 module entrypoint
 #[pymodule]
 fn semaflow(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    init_tracing();
     m.add_class::<PyDataSource>()?;
     m.add_class::<PyTableHandle>()?;
     m.add_class::<PyJoinKey>()?;
@@ -633,16 +659,21 @@ impl SemanticFlowHandle {
     /// Build SQL for a request dict.
     #[pyo3(text_signature = "(self, request)")]
     fn build_sql(&self, py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<String> {
+        let start = Instant::now();
         let request = parse_request(py, request)?;
         let builder = SqlBuilder::default();
         let registry = self.registry.clone();
-        py.allow_threads(|| builder.build_for_request(&registry, &self.connections, &request))
-            .map_err(to_validation_err)
+        let sql = py
+            .allow_threads(|| builder.build_for_request(&registry, &self.connections, &request))
+            .map_err(to_validation_err)?;
+        tracing::debug!(ms = start.elapsed().as_millis(), "build_sql complete");
+        Ok(sql)
     }
 
     /// Execute a request dict and return list[dict] rows.
     #[pyo3(text_signature = "(self, request)")]
     fn execute(&self, py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let start = Instant::now();
         let request = parse_request(py, request)?;
         let registry = self.registry.clone();
         let connections = self.connections.clone();
@@ -658,6 +689,10 @@ impl SemanticFlowHandle {
             .map_err(to_validation_err)?;
         let json = py.import_bound("json")?;
         let py_obj = json.call_method1("loads", (rows_json,))?;
+        tracing::debug!(
+            ms = start.elapsed().as_millis(),
+            "execute complete"
+        );
         Ok(py_obj.into_py(py))
     }
 

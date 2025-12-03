@@ -78,6 +78,7 @@ class SemanticTable:
         measures: Optional[Dict[str, Measure | Dict[str, Any]]] = ...,
         description: Optional[str] = ...,
     ) -> "SemanticTable": ...
+    @property
     def data_source(self) -> Optional[DataSource]: ...
 
 class SemanticFlow:

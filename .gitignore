@@ -16,3 +16,4 @@ target/
 target
 .venv
 AGENTS.md
+.uv_cache

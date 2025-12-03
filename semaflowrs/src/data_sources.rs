@@ -9,6 +9,8 @@ use crate::dialect::{Dialect, DuckDbDialect};
 use crate::error::{Result, SemaflowError};
 use crate::executor::{ColumnMeta, QueryResult};
 use crate::schema_cache::{ForeignKey, TableSchema};
+use tokio::sync::Mutex;
+use std::time::Instant;
 
 /// Unified interface for all backends (DuckDB for now).
 #[async_trait]
@@ -46,6 +48,7 @@ pub struct DuckDbConnection {
     database_path: PathBuf,
     dialect: DuckDbDialect,
     limiter: Arc<Semaphore>,
+    pool: Arc<Mutex<Vec<duckdb::Connection>>>,
 }
 
 impl DuckDbConnection {
@@ -54,6 +57,7 @@ impl DuckDbConnection {
             database_path: path.as_ref().to_path_buf(),
             dialect: DuckDbDialect,
             limiter: Arc::new(Semaphore::new(16)),
+            pool: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -69,6 +73,14 @@ impl DuckDbConnection {
             .await
             .map_err(|e| SemaflowError::Execution(format!("limiter closed: {e}")))
     }
+
+    async fn checkout_connection(&self) -> Result<duckdb::Connection> {
+        if let Some(conn) = self.pool.lock().await.pop() {
+            return Ok(conn);
+        }
+        duckdb::Connection::open(self.database_path.clone())
+            .map_err(|e| SemaflowError::Execution(format!("open duckdb: {e}")))
+    }
 }
 
 #[async_trait]
@@ -78,10 +90,12 @@ impl BackendConnection for DuckDbConnection {
     }
 
     async fn fetch_schema(&self, table: &str) -> Result<TableSchema> {
-        let path = self.database_path.clone();
         let table = table.to_string();
-        tokio::task::spawn_blocking(move || -> Result<TableSchema> {
-            let conn = duckdb::Connection::open(path)?;
+        let conn = self.checkout_connection().await?;
+        let pool = self.pool.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<(TableSchema, duckdb::Connection)> {
+            let start = Instant::now();
+            let mut conn = conn;
 
             let pragma_sql = format!("PRAGMA table_info('{table}')");
             let mut stmt = conn.prepare(&pragma_sql)?;
@@ -119,22 +133,40 @@ impl BackendConnection for DuckDbConnection {
                 }
             }
 
-            Ok(TableSchema {
-                columns,
-                primary_keys,
-                foreign_keys,
-            })
+            let elapsed = start.elapsed();
+            tracing::debug!(
+                table = table.as_str(),
+                ms = elapsed.as_millis(),
+                "duckdb fetch_schema"
+            );
+            Ok((
+                TableSchema {
+                    columns,
+                    primary_keys,
+                    foreign_keys,
+                },
+                conn,
+            ))
         })
         .await
-        .map_err(|e| SemaflowError::Execution(format!("task join error: {e}")))?
+        .map_err(|e| SemaflowError::Execution(format!("task join error: {e}")))?;
+
+        let (schema, conn) = result?;
+        {
+            let mut guard = pool.lock().await;
+            guard.push(conn);
+        }
+        Ok(schema)
     }
 
     async fn execute_sql(&self, sql: &str) -> Result<QueryResult> {
-        let path = self.database_path.clone();
         let sql = sql.to_string();
         let _permit = self.acquire_slot().await?;
-        tokio::task::spawn_blocking(move || -> Result<QueryResult> {
-            let conn = duckdb::Connection::open(path)?;
+        let conn = self.checkout_connection().await?;
+        let pool = self.pool.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<(QueryResult, duckdb::Connection)> {
+            let start = Instant::now();
+            let mut conn = conn;
             let mut stmt = conn.prepare(&sql)?;
             let mut rows_iter = stmt.query([])?;
             let stmt_ref = rows_iter
@@ -151,20 +183,33 @@ impl BackendConnection for DuckDbConnection {
             while let Some(row) = rows_iter.next()? {
                 let mut map = serde_json::Map::new();
                 for (idx, name) in column_names.iter().enumerate() {
-                    let value =
-                        crate::executor::duck_value_to_json(row.get_ref(idx)?.to_owned());
+                    let value = crate::executor::duck_value_to_json(row.get_ref(idx)?.to_owned());
                     map.insert(name.clone(), value);
                 }
                 rows.push(map);
             }
 
-            let columns = column_names
+            let columns: Vec<_> = column_names
                 .into_iter()
                 .map(|name| ColumnMeta { name })
                 .collect();
-            Ok(QueryResult { columns, rows })
+            let elapsed = start.elapsed();
+            tracing::debug!(
+                rows = rows.len(),
+                columns = columns.len(),
+                ms = elapsed.as_millis(),
+                "duckdb execute_sql"
+            );
+            Ok((QueryResult { columns, rows }, conn))
         })
         .await
-        .map_err(|e| SemaflowError::Execution(format!("task join error: {e}")))?
+        .map_err(|e| SemaflowError::Execution(format!("task join error: {e}")))?;
+
+        let (result, conn) = result?;
+        {
+            let mut guard = pool.lock().await;
+            guard.push(conn);
+        }
+        Ok(result)
     }
 }

@@ -95,7 +95,8 @@ def build_flow_handles(flows: Mapping[str, SemanticFlow]) -> FlowHandle:
         flow_list.append(flow)
         for table in flow.referenced_tables():
             unique_tables.setdefault(table.name, table)
-            ds = table.data_source()
+            ds_attr = getattr(table, "data_source", None)
+            ds = ds_attr() if callable(ds_attr) else ds_attr
             if ds is None:
                 raise ValueError(
                     "tables must be constructed with a DataSource instance; pass DataSource(...) into SemanticTable"
