@@ -4,7 +4,10 @@
 - Semantic flow ownership in Rust (tables, dimensions, measures, joins, time grain).
 - AST-first SQL planner + renderer; per-dialect `Dialect` impls (DuckDB implemented; Postgres/BigQuery/Snowflake planned).
 - Async backends via `BackendConnection` + `ConnectionManager`; connections embedded in semantic tables for zero-copy lookups.
-- Query planner (current: direct mapping; planned: join pruning, grain inference, subquery building).
+- Query planner:
+  - Join pruning: unused joins are dropped when proven safe (LEFT joins whose keys target the joined table’s primary key). Joins that are INNER or ambiguous grain stay to avoid changing multiplicity.
+  - Grain-aware dependency walk: requested fields/filters/order collect required aliases; dependency chains are emitted in order (parent join before child).
+  - Future: grain inference for multi-column PKs/explicit cardinality hints, subquery building for mismatched grains.
 - Execution engine async and backpressured (DuckDB semaphore now; future: BigQuery job polling, Postgres/Snowflake pools).
 - Schema cache keyed by (data_source, table); validation enforces PK/time dimension/join keys/single data source per flow.
 - Python bindings via PyO3; GIL released around Rust work; shared tokio runtime.
@@ -18,7 +21,7 @@
 
 ## Performance Targets
 - Rust async for planning/execution; Python only routes requests.
-- Backpressure per backend (DuckDB limiter now; targets: BigQuery job caps, Postgres pool limits).
+- Backpressure per backend (DuckDB semaphore + connection reuse now; targets: BigQuery job caps, Postgres pool limits).
 - GIL-free execution path; shared runtime avoids spawning per-call runtimes.
 
 ## Roadmap Highlights

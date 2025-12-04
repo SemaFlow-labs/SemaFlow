@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::data_sources::ConnectionManager;
 use crate::error::{Result, SemaflowError};
@@ -30,6 +30,7 @@ impl SqlBuilder {
             .ok_or_else(|| SemaflowError::Validation(format!("unknown flow {}", request.flow)))?;
 
         let alias_to_table = self.build_alias_map(flow, registry)?;
+        let mut required_aliases: HashSet<String> = HashSet::new();
 
         let base_table = alias_to_table.get(&flow.base_table.alias).ok_or_else(|| {
             SemaflowError::Validation(format!(
@@ -37,6 +38,7 @@ impl SqlBuilder {
                 flow.base_table.alias
             ))
         })?;
+        required_aliases.insert(flow.base_table.alias.clone());
 
         let mut query = SelectQuery::default();
         query.from = TableRef {
@@ -47,6 +49,7 @@ impl SqlBuilder {
         for dim_name in &request.dimensions {
             let (_table, alias, dimension) =
                 self.resolve_dimension(dim_name, flow, registry, &alias_to_table)?;
+            required_aliases.insert(alias.clone());
             let expr = expr_to_sql(&dimension.expression, &alias);
             query.group_by.push(expr.clone());
             query.select.push(SelectItem {
@@ -58,6 +61,7 @@ impl SqlBuilder {
         for measure_name in &request.measures {
             let (_table, alias, measure) =
                 self.resolve_measure(measure_name, flow, registry, &alias_to_table)?;
+            required_aliases.insert(alias.clone());
             let base_expr = expr_to_sql(&measure.expr, &alias);
             let agg_expr = SqlExpr::Aggregate {
                 agg: measure.agg.clone(),
@@ -75,7 +79,42 @@ impl SqlBuilder {
             ));
         }
 
-        for join in flow.joins.values() {
+        if !request.filters.is_empty() {
+            for filter in &request.filters {
+                let (expr, kind, alias) =
+                    self.resolve_field_expression(&filter.field, flow, registry, &alias_to_table)?;
+                if matches!(kind, FieldKind::Measure) {
+                    return Err(SemaflowError::Validation(
+                        "filters on measures are not supported (row-level filters only)"
+                            .to_string(),
+                    ));
+                }
+                if let Some(alias) = alias {
+                    required_aliases.insert(alias);
+                }
+                query.filters.push(render_filter_expr(expr, filter));
+            }
+        }
+
+        if !request.order.is_empty() {
+            for item in &request.order {
+                let (expr, _, alias) =
+                    self.resolve_field_expression(&item.column, flow, registry, &alias_to_table)?;
+                if let Some(alias) = alias {
+                    required_aliases.insert(alias);
+                }
+                query.order_by.push(OrderItem {
+                    expr,
+                    direction: item.direction.clone(),
+                });
+            }
+        }
+
+        query.limit = request.limit.map(|v| v as u64);
+        query.offset = request.offset.map(|v| v as u64);
+
+        let required_joins = self.select_required_joins(flow, &required_aliases, &alias_to_table)?;
+        for join in required_joins {
             let join_table = alias_to_table.get(&join.alias).ok_or_else(|| {
                 SemaflowError::Validation(format!(
                     "missing semantic table for join alias {}",
@@ -110,34 +149,6 @@ impl SqlBuilder {
                 on: on_clause,
             });
         }
-
-        if !request.filters.is_empty() {
-            for filter in &request.filters {
-                let (expr, kind) =
-                    self.resolve_field_expression(&filter.field, flow, registry, &alias_to_table)?;
-                if matches!(kind, FieldKind::Measure) {
-                    return Err(SemaflowError::Validation(
-                        "filters on measures are not supported (row-level filters only)"
-                            .to_string(),
-                    ));
-                }
-                query.filters.push(render_filter_expr(expr, filter));
-            }
-        }
-
-        if !request.order.is_empty() {
-            for item in &request.order {
-                let (expr, _) =
-                    self.resolve_field_expression(&item.column, flow, registry, &alias_to_table)?;
-                query.order_by.push(OrderItem {
-                    expr,
-                    direction: item.direction.clone(),
-                });
-            }
-        }
-
-        query.limit = request.limit.map(|v| v as u64);
-        query.offset = request.offset.map(|v| v as u64);
 
         let renderer = SqlRenderer::new(dialect);
         Ok(renderer.render_select(&query))
@@ -193,6 +204,90 @@ impl SqlBuilder {
             map.insert(join.alias.clone(), table);
         }
         Ok(map)
+    }
+
+    fn select_required_joins<'a>(
+        &self,
+        flow: &'a SemanticFlow,
+        required_aliases: &HashSet<String>,
+        alias_to_table: &HashMap<String, &'a SemanticTable>,
+    ) -> Result<Vec<&'a crate::flows::FlowJoin>> {
+        let base_alias = &flow.base_table.alias;
+        let mut join_by_alias: HashMap<&str, &crate::flows::FlowJoin> = HashMap::new();
+        for join in flow.joins.values() {
+            join_by_alias.insert(join.alias.as_str(), join);
+        }
+
+        let mut needed: HashSet<String> = HashSet::new();
+        let mut stack: Vec<String> = required_aliases
+            .iter()
+            .filter(|a| *a != base_alias)
+            .cloned()
+            .collect();
+        // Always include joins that are not safe to prune (e.g., inner or unknown cardinality).
+        for join in flow.joins.values() {
+            if !self.safe_to_prune(join, alias_to_table) && join.alias != *base_alias {
+                stack.push(join.alias.clone());
+            }
+        }
+        while let Some(alias) = stack.pop() {
+            if !needed.insert(alias.clone()) {
+                continue;
+            }
+            let join = join_by_alias.get(alias.as_str()).ok_or_else(|| {
+                SemaflowError::Validation(format!("missing join definition for alias {}", alias))
+            })?;
+            if join.to_table != *base_alias {
+                stack.push(join.to_table.clone());
+            }
+        }
+
+        let mut ordered = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        for join in flow.joins.values() {
+            if needed.contains(&join.alias) {
+                self.visit_join(&join.alias, base_alias, &join_by_alias, &mut visited, &mut ordered)?;
+            }
+        }
+        Ok(ordered)
+    }
+
+    fn safe_to_prune(
+        &self,
+        join: &crate::flows::FlowJoin,
+        alias_to_table: &HashMap<String, &SemanticTable>,
+    ) -> bool {
+        if join.join_type != crate::flows::JoinType::Left {
+            return false;
+        }
+        if let Some(table) = alias_to_table.get(&join.alias) {
+            if join.join_keys.len() == 1 && join.join_keys[0].right == table.primary_key {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn visit_join<'a>(
+        &self,
+        alias: &str,
+        base_alias: &str,
+        join_by_alias: &HashMap<&'a str, &'a crate::flows::FlowJoin>,
+        visited: &mut HashSet<String>,
+        ordered: &mut Vec<&'a crate::flows::FlowJoin>,
+    ) -> Result<()> {
+        if visited.contains(alias) {
+            return Ok(());
+        }
+        let join = *join_by_alias.get(alias).ok_or_else(|| {
+            SemaflowError::Validation(format!("missing join definition for alias {}", alias))
+        })?;
+        if join.to_table != base_alias {
+            self.visit_join(&join.to_table, base_alias, join_by_alias, visited, ordered)?;
+        }
+        visited.insert(alias.to_string());
+        ordered.push(join);
+        Ok(())
     }
 
     fn resolve_dimension<'a>(
@@ -325,16 +420,15 @@ impl SqlBuilder {
         flow: &SemanticFlow,
         registry: &FlowRegistry,
         alias_map: &HashMap<String, &SemanticTable>,
-    ) -> Result<(SqlExpr, FieldKind)> {
+    ) -> Result<(SqlExpr, FieldKind, Option<String>)> {
         if let Some((_, alias, dim)) =
             self.resolve_dimension_inner(name, flow, registry, alias_map)?
         {
             let expr = expr_to_sql(&dim.expression, &alias);
-            return Ok((expr, FieldKind::Dimension));
+            return Ok((expr, FieldKind::Dimension, Some(alias)));
         }
-        if self
-            .resolve_measure_inner(name, flow, registry, alias_map)?
-            .is_some()
+        if let Some((_, alias, _)) =
+            self.resolve_measure_inner(name, flow, registry, alias_map)?
         {
             return Ok((
                 SqlExpr::Column {
@@ -342,6 +436,7 @@ impl SqlBuilder {
                     name: name.to_string(),
                 },
                 FieldKind::Measure,
+                Some(alias),
             ));
         }
         Err(SemaflowError::Validation(format!(
