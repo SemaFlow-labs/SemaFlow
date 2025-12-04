@@ -37,6 +37,9 @@ pub enum SqlExpr {
         list: Vec<SqlExpr>,
         negated: bool,
     },
+    Exists {
+        subquery: Box<SelectQuery>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +71,7 @@ pub struct SelectItem {
 pub struct TableRef {
     pub name: String,
     pub alias: Option<String>,
+    pub subquery: Option<Box<SelectQuery>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -183,6 +187,14 @@ impl<'d> SqlRenderer<'d> {
     }
 
     fn render_table_ref(&self, table: &TableRef) -> String {
+        if let Some(subquery) = &table.subquery {
+            let rendered = self.render_select(subquery);
+            let alias = table
+                .alias
+                .as_ref()
+                .expect("subquery table refs must include alias");
+            return format!("({rendered}) {}", self.dialect.quote_ident(alias));
+        }
         match &table.alias {
             Some(alias) => format!(
                 "{} {}",
@@ -283,6 +295,9 @@ impl<'d> SqlRenderer<'d> {
                     not_kw,
                     rendered_values.join(", ")
                 )
+            }
+            SqlExpr::Exists { subquery } => {
+                format!("EXISTS ({})", self.render_select(subquery))
             }
         }
     }

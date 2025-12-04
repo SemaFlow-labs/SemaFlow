@@ -89,6 +89,7 @@ pub(crate) fn build_join(
         table: TableRef {
             name: join_table.table.clone(),
             alias: Some(join.alias.clone()),
+            subquery: None,
         },
         on: on_clause,
     })

@@ -18,6 +18,7 @@ fn renders_join_group_order_and_aggregates() {
     query.from = TableRef {
         name: "orders".to_string(),
         alias: Some("o".to_string()),
+        subquery: None,
     };
     query.select = vec![
         SelectItem {
@@ -38,6 +39,7 @@ fn renders_join_group_order_and_aggregates() {
         table: TableRef {
             name: "customers".to_string(),
             alias: Some("c".to_string()),
+            subquery: None,
         },
         on: vec![SqlExpr::BinaryOp {
             op: SqlBinaryOperator::Eq,
@@ -72,6 +74,7 @@ fn renders_functions_and_not_in_list() {
     query.from = TableRef {
         name: "orders".to_string(),
         alias: Some("o".to_string()),
+        subquery: None,
     };
     query.select.push(SelectItem {
         expr: SqlExpr::Function {
@@ -104,6 +107,7 @@ fn renders_filtered_aggregate_when_supported() {
     query.from = TableRef {
         name: "orders".to_string(),
         alias: Some("o".to_string()),
+        subquery: None,
     };
     query.select.push(SelectItem {
         expr: SqlExpr::FilteredAggregate {

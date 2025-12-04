@@ -211,3 +211,95 @@ fn unqualified_fields_error_when_ambiguous() {
         other => panic!("unexpected error {other:?}"),
     }
 }
+
+#[test]
+fn preaggregates_when_filtering_on_join_dimension() {
+    let mut registry = inline_registry();
+    let customers = SemanticTable {
+        data_source: "ds1".to_string(),
+        name: "customers".to_string(),
+        table: "customers".to_string(),
+        primary_key: "id".to_string(),
+        time_dimension: None,
+        smallest_time_grain: None,
+        dimensions: [(
+            "customer_country".to_string(),
+            semaflow::flows::Dimension {
+                expression: Expr::Column {
+                    column: "country".to_string(),
+                },
+                data_type: None,
+                description: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        measures: Default::default(),
+        description: None,
+    };
+
+    let flow = semaflow::flows::SemanticFlow {
+        name: "sales".to_string(),
+        base_table: FlowTableRef {
+            semantic_table: "orders".to_string(),
+            alias: "o".to_string(),
+        },
+        joins: [(
+            "customers".to_string(),
+            FlowJoin {
+                semantic_table: "customers".to_string(),
+                alias: "c".to_string(),
+                to_table: "o".to_string(),
+                join_type: semaflow::flows::JoinType::Left,
+                join_keys: vec![semaflow::flows::JoinKey {
+                    left: "customer_id".to_string(),
+                    right: "id".to_string(),
+                }],
+                description: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        description: None,
+    };
+
+    registry.tables.insert(customers.name.clone(), customers);
+    registry.flows.insert(flow.name.clone(), flow);
+
+    let request = QueryRequest {
+        flow: "sales".to_string(),
+        dimensions: vec!["customer_country".to_string()],
+        measures: vec!["order_total".to_string()],
+        filters: vec![semaflow::flows::Filter {
+            field: "customer_country".to_string(),
+            op: semaflow::flows::FilterOp::Eq,
+            value: serde_json::json!("US"),
+        }],
+        order: vec![],
+        limit: None,
+        offset: None,
+    };
+
+    let sql = SqlBuilder::default()
+        .build_with_dialect(&registry, &request, &DuckDbDialect)
+        .unwrap();
+
+    assert!(
+        sql.contains("FROM (SELECT"),
+        "expected derived table for pre-aggregation; sql={sql}"
+    );
+    assert!(
+        sql.contains("EXISTS (SELECT true FROM \"customers\" \"c\""),
+        "dimension filter should be applied via EXISTS; sql={sql}"
+    );
+    assert!(
+        sql.contains(
+            "LEFT JOIN \"customers\" \"c\" ON (\"fact_preagg\".\"c__customer_id\" = \"c\".\"id\")"
+        ),
+        "outer join should connect pre-agg keys to dimension; sql={sql}"
+    );
+    assert!(
+        sql.contains("\"c\".\"country\" AS \"customer_country\""),
+        "outer select should project dimension from joined table; sql={sql}"
+    );
+}
