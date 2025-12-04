@@ -2,6 +2,7 @@ pub mod data_sources;
 pub mod dialect;
 pub mod error;
 pub mod executor;
+pub mod expr_parser;
 pub mod flows;
 #[cfg(feature = "python")]
 pub mod python;
@@ -30,7 +31,7 @@ pub async fn load_and_validate<P: AsRef<Path>>(
 pub use crate::validation::Validator;
 pub use data_sources::{BackendConnection, ConnectionManager, DuckDbConnection};
 pub use error::SemaflowError;
-pub use executor::{QueryResult};
+pub use executor::QueryResult;
 pub use flows::{QueryRequest, SemanticFlow, SemanticTable};
 pub use query_builder::SqlBuilder;
 pub use registry::{DimensionInfo, FlowSchema, FlowSummary, MeasureInfo};

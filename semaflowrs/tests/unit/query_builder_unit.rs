@@ -1,6 +1,6 @@
 use semaflow::dialect::DuckDbDialect;
 use semaflow::flows::{
-    Aggregation, Expr, Function, FlowJoin, FlowTableRef, QueryRequest, SemanticFlow, SemanticTable,
+    Aggregation, Expr, FlowJoin, FlowTableRef, Function, QueryRequest, SemanticFlow, SemanticTable,
     TimeGrain,
 };
 use semaflow::query_builder::SqlBuilder;
@@ -50,6 +50,8 @@ fn inline_registry() -> FlowRegistry {
                         column: "amount".to_string(),
                     },
                     agg: Aggregation::Sum,
+                    filter: None,
+                    post_expr: None,
                     data_type: None,
                     description: None,
                 },
@@ -61,6 +63,8 @@ fn inline_registry() -> FlowRegistry {
                         column: "customer_id".to_string(),
                     },
                     agg: Aggregation::CountDistinct,
+                    filter: None,
+                    post_expr: None,
                     data_type: None,
                     description: None,
                 },

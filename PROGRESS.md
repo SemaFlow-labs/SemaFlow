@@ -2,12 +2,13 @@
 
 ## Core capabilities
 - **Semantic flow registry**: load from YAML or in-memory structs; tables include `data_source`, dimensions, measures (Expr DSL), time dimension, join keys.
-- **Expr DSL**: columns (string shorthand), literals, CASE, binary ops, functions (date_trunc/part, lower/upper, coalesce/ifnull, now, concat/concat_ws, substring, length, greatest/least, trim/ltrim/rtrim, cast), aggregations (sum, count, count_distinct, min, max, avg).
-- **SQL generation**: `SqlBuilder::build_for_request` builds a SQL AST and renders it with dialect support (DuckDB implemented via `DuckDbDialect`). Alias-qualified fields (`alias.field`) are accepted.
+- **Expr DSL**: columns (string shorthand), literals, CASE, binary ops, functions (date_trunc/part, lower/upper, coalesce/ifnull, now, concat/concat_ws, substring, length, greatest/least, trim/ltrim/rtrim, cast, safe_divide), aggregations (sum, count, count_distinct, min, max, avg).
+- **Measures**: base aggregates, measure-level filters (CASE-wrapped aggregates), and derived measures via `post_expr` with auto-included dependencies. Derived→derived references are rejected to avoid grain surprises.
+- **SQL generation**: modular `SqlBuilder` builds a SQL AST and renders with dialect support (DuckDB implemented via `DuckDbDialect`). Alias-qualified fields (`alias.field`) are accepted; join pruning applied when safe.
 - **Validation**: checks columns/PK/time dimension, join alias uniqueness, join key columns, and enforces single data source per flow. Schema cache keyed by (data_source, table).
 - **Connections/runtime**: unified `BackendConnection` trait + `ConnectionManager` (DuckDB implementation) provide dialect lookup, schema fetch, and SQL execution for runtime and validation paths.
-- **Backpressure**: DuckDB backend includes a configurable max in-flight limiter.
-- **Examples**: semantic definitions under `examples/flows`, Python demo (`examples/python_demo.py`), and FastAPI sample (`examples/semantic_api.py`).
+- **Backpressure**: DuckDB backend includes a configurable max in-flight limiter plus connection reuse.
+- **Docs & examples**: semantic definitions under `examples/flows`, Python demos (`examples/python_demo.py`, `examples/python_objects_demo.py`), FastAPI sample (`examples/semantic_api.py`), and deeper guides in `docs/`.
 
 ## Python bindings (feature `python`)
 - PyO3 module `semaflow` (gated by `--features python`) exposes class `SemanticFlow` plus low-level functions.
@@ -21,8 +22,9 @@
 
 ## Open items / next steps
 - Broaden dialect support (Postgres/BigQuery) and extend Expr helpers as needed.
-- Planner improvements: join pruning, grain inference, subquerying.
-- Per-backend pooling/backpressure/timeout knobs; optional caching.
+- Planner: join pruning implemented (safe for left joins with PK-based keys); next up grain inference (multi-col PKs/cardinality hints) and subquerying for mismatched grains.
+- Parsing/UX: keep concise filter/post_expr syntax lightweight while expanding operator coverage; consider swapping in a tiny expression parser crate if it preserves safety and concurrency guarantees.
+- Per-backend pooling/backpressure/timeout knobs.
 - Python package hardening (async APIs, wheel publishing, automated tests).
 - CI with coverage reporting.
 - Validation should walk nested expressions (CASE/func/binary) to surface missing columns before runtime.

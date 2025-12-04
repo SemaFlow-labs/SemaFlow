@@ -39,8 +39,16 @@ impl FlowRegistry {
         let tables_dir = root.join("tables");
         let flows_dir = root.join("flows");
 
-        let tables_path = if tables_dir.exists() { tables_dir } else { root.to_path_buf() };
-        let flows_path = if flows_dir.exists() { flows_dir } else { root.to_path_buf() };
+        let tables_path = if tables_dir.exists() {
+            tables_dir
+        } else {
+            root.to_path_buf()
+        };
+        let flows_path = if flows_dir.exists() {
+            flows_dir
+        } else {
+            root.to_path_buf()
+        };
 
         registry.load_tables(tables_path)?;
         registry.load_flows(flows_path)?;
@@ -83,7 +91,10 @@ impl FlowRegistry {
                 self.tables.insert(table.name.clone(), table);
                 Ok(true)
             }
-            Err(_) => Ok(false),
+            Err(e) => Err(SemaflowError::Validation(format!(
+                "failed to parse table {}: {e}",
+                path.display()
+            ))),
         }
     }
 
@@ -123,7 +134,10 @@ impl FlowRegistry {
                 self.flows.insert(flow.name.clone(), flow);
                 Ok(true)
             }
-            Err(_) => Ok(false),
+            Err(e) => Err(SemaflowError::Validation(format!(
+                "failed to parse flow {}: {e}",
+                path.display()
+            ))),
         }
     }
 
@@ -164,12 +178,7 @@ impl FlowRegistry {
         let mut dimensions = Vec::new();
         let mut measures = Vec::new();
 
-        collect_fields(
-            &flow.base_table,
-            base_table,
-            &mut dimensions,
-            &mut measures,
-        );
+        collect_fields(&flow.base_table, base_table, &mut dimensions, &mut measures);
 
         for (join_name, join) in &flow.joins {
             let table = self.tables.get(&join.semantic_table).ok_or_else(|| {
@@ -230,6 +239,8 @@ fn collect_fields(
             table_alias: table_ref.alias.clone(),
             expr: measure.expr.clone(),
             agg: measure.agg.clone(),
+            filter: measure.filter.clone(),
+            post_expr: measure.post_expr.clone(),
         });
     }
 }
@@ -273,4 +284,6 @@ pub struct MeasureInfo {
     pub table_alias: String,
     pub expr: Expr,
     pub agg: Aggregation,
+    pub filter: Option<Expr>,
+    pub post_expr: Option<Expr>,
 }

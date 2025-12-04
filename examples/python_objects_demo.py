@@ -78,6 +78,27 @@ async def main() -> None:
             "distinct_customers": Measure(
                 "customer_id", "count_distinct", description="Distinct customers ordering"
             ),
+            "us_order_total": Measure(
+                "amount",
+                "sum",
+                description="Orders for customer_id 1",
+                filter={
+                    "type": "binary",
+                    "op": "eq",
+                    "left": "customer_id",
+                    "right": {"type": "literal", "value": 1},
+                },
+            ),
+            "avg_order_amount": Measure(
+                "amount",
+                "sum",
+                description="Average order amount (safe divide)",
+                post_expr={
+                    "type": "func",
+                    "func": "safe_divide",
+                    "args": [{"measure": "order_total"}, {"measure": "order_count"}],
+                },
+            ),
         },
         description="Orders fact table",
     )
@@ -116,7 +137,7 @@ async def main() -> None:
     request = {
         "flow": "sales",
         "dimensions": ["c.country"],
-        "measures": ["o.order_total", "c.customer_count"],
+        "measures": ["o.order_total", "o.order_count", "o.us_order_total", "o.avg_order_amount", "c.customer_count"],
         "filters": [],
         "order": [{"column": "o.order_total", "direction": "desc"}],
         "limit": 10,

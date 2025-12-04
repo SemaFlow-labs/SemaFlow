@@ -47,19 +47,14 @@ impl Validator {
         {
             return Ok(schema);
         }
-        let provider = self
-            .connections
-            .get(data_source)
-            .ok_or_else(|| SemaflowError::Validation(format!("unknown data source {data_source}")))?;
+        let provider = self.connections.get(data_source).ok_or_else(|| {
+            SemaflowError::Validation(format!("unknown data source {data_source}"))
+        })?;
         let schema = provider.fetch_schema(table).await?;
         self.cache
             .lock()
             .map_err(|e| SemaflowError::Other(anyhow!("schema cache lock: {e}")))?
-            .insert(
-            data_source.to_string(),
-            table.to_string(),
-            schema.clone(),
-        );
+            .insert(data_source.to_string(), table.to_string(), schema.clone());
         Ok(schema)
     }
 
@@ -97,6 +92,24 @@ impl Validator {
                 column_names.contains(time_dim),
                 format!("time_dimension {time_dim} missing in table {}", table.name),
             )?;
+        }
+
+        for (name, measure) in &table.measures {
+            if let Some(post) = &measure.post_expr {
+                let mut refs = Vec::new();
+                collect_measure_refs(post, &mut refs);
+                for r in refs {
+                    let dep = table.measures.get(&r).ok_or_else(|| {
+                        SemaflowError::Validation(format!(
+                            "measure {name} post_expr references unknown measure {r}"
+                        ))
+                    })?;
+                    self.check(
+                        !dep.post_expr.is_some(),
+                        format!("derived measure {name} cannot reference derived measure {r}"),
+                    )?;
+                }
+            }
         }
 
         Ok(())
@@ -216,4 +229,26 @@ fn table_has_column(table: &SemanticTable, col: &str) -> bool {
         .dimensions
         .values()
         .any(|d| simple_column_name(&d.expression) == Some(col))
+}
+
+fn collect_measure_refs(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::MeasureRef { name } => out.push(name.clone()),
+        Expr::Func { args, .. } => args.iter().for_each(|a| collect_measure_refs(a, out)),
+        Expr::Case {
+            branches,
+            else_expr,
+        } => {
+            for b in branches {
+                collect_measure_refs(&b.when, out);
+                collect_measure_refs(&b.then, out);
+            }
+            collect_measure_refs(else_expr, out);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_measure_refs(left, out);
+            collect_measure_refs(right, out);
+        }
+        _ => {}
+    }
 }

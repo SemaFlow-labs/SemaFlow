@@ -55,6 +55,8 @@ fn registry_with_join() -> FlowRegistry {
                     column: "amount".to_string(),
                 },
                 agg: Aggregation::Sum,
+                filter: None,
+                post_expr: None,
                 data_type: None,
                 description: None,
             },

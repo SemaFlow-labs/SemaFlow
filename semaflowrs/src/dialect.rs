@@ -86,6 +86,10 @@ impl Dialect for DuckDbDialect {
             Function::Trim => format!("trim({})", args.join(", ")),
             Function::Ltrim => format!("ltrim({})", args.join(", ")),
             Function::Rtrim => format!("rtrim({})", args.join(", ")),
+            Function::SafeDivide => match args.as_slice() {
+                [left, right] => format!("{left} / NULLIF({right}, 0)"),
+                _ => "NULL".to_string(),
+            },
         }
     }
 }

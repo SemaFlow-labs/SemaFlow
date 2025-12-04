@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::expr_parser::parse_expr;
 use serde::{de, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,13 +59,63 @@ impl<'de> Deserialize<'de> for Dimension {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Measure {
     pub expr: Expr,
     pub agg: Aggregation,
+    #[serde(default)]
+    pub filter: Option<Expr>,
+    #[serde(default)]
+    pub post_expr: Option<Expr>,
     pub data_type: Option<String>,
     pub description: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Measure {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            expr: Value,
+            agg: Aggregation,
+            #[serde(default)]
+            filter: Option<Value>,
+            #[serde(default)]
+            post_expr: Option<Value>,
+            data_type: Option<String>,
+            description: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let expr: Expr = serde_json::from_value(raw.expr).map_err(de::Error::custom)?;
+
+        let filter = match raw.filter {
+            Some(Value::String(s)) => parse_expr(&s)
+                .ok()
+                .or_else(|| Some(Expr::Column { column: s.clone() })),
+            Some(other) => Some(serde_json::from_value(other).map_err(de::Error::custom)?),
+            None => None,
+        };
+        let post_expr = match raw.post_expr {
+            Some(Value::String(s)) => parse_expr(&s)
+                .ok()
+                .or_else(|| Some(Expr::Column { column: s.clone() })),
+            Some(other) => Some(serde_json::from_value(other).map_err(de::Error::custom)?),
+            None => None,
+        };
+
+        Ok(Measure {
+            expr,
+            agg: raw.agg,
+            filter,
+            post_expr,
+            data_type: raw.data_type,
+            description: raw.description,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +126,9 @@ pub enum Expr {
     },
     Literal {
         value: Value,
+    },
+    MeasureRef {
+        name: String,
     },
     Func {
         func: Function,
@@ -99,6 +153,15 @@ impl<'de> Deserialize<'de> for Expr {
         let value = serde_json::Value::deserialize(deserializer)?;
         match value {
             Value::String(s) => Ok(Expr::Column { column: s }),
+            Value::Object(map) if map.len() == 1 && map.contains_key("measure") => {
+                let name = map
+                    .get("measure")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| de::Error::custom("measure reference must be a string"))?;
+                Ok(Expr::MeasureRef {
+                    name: name.to_string(),
+                })
+            }
             other => {
                 #[derive(Deserialize)]
                 #[serde(tag = "type", rename_all = "snake_case")]
@@ -108,6 +171,9 @@ impl<'de> Deserialize<'de> for Expr {
                     },
                     Literal {
                         value: Value,
+                    },
+                    MeasureRef {
+                        name: String,
                     },
                     Func {
                         func: Function,
@@ -128,6 +194,7 @@ impl<'de> Deserialize<'de> for Expr {
                 Ok(match tagged {
                     TaggedExpr::Column { column } => Expr::Column { column },
                     TaggedExpr::Literal { value } => Expr::Literal { value },
+                    TaggedExpr::MeasureRef { name } => Expr::MeasureRef { name },
                     TaggedExpr::Func { func, args } => Expr::Func { func, args },
                     TaggedExpr::Case {
                         branches,
@@ -169,6 +236,7 @@ pub enum Function {
     Trim,
     Ltrim,
     Rtrim,
+    SafeDivide,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +247,14 @@ pub enum BinaryOp {
     Multiply,
     Divide,
     Modulo,
+    Eq,
+    Neq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

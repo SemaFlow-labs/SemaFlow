@@ -26,3 +26,13 @@ measures:
     expr: customer_id
     agg: count_distinct
     description: Distinct customers ordering
+  us_order_total:
+    expr: amount
+    agg: sum
+    filter: "customer_id == 1"
+    description: Orders for customer_id 1
+  avg_order_amount:
+    expr: amount
+    agg: sum
+    post_expr: "safe_divide(order_total, order_count)"
+    description: Average order amount (safe divide)

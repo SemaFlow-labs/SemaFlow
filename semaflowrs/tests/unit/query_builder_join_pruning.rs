@@ -32,6 +32,8 @@ fn registry_with_chain() -> FlowRegistry {
                     column: "amount".to_string(),
                 },
                 agg: Aggregation::Sum,
+                filter: None,
+                post_expr: None,
                 data_type: None,
                 description: None,
             },
@@ -192,8 +194,12 @@ fn includes_dependency_chain_for_deeper_dimension() {
     let sql = SqlBuilder::default()
         .build_with_dialect(&registry, &request, &DuckDbDialect)
         .unwrap();
-    let customers_join_idx = sql.find("JOIN \"customers\" \"c\"").expect("customers join missing");
-    let regions_join_idx = sql.find("JOIN \"regions\" \"r\"").expect("regions join missing");
+    let customers_join_idx = sql
+        .find("JOIN \"customers\" \"c\"")
+        .expect("customers join missing");
+    let regions_join_idx = sql
+        .find("JOIN \"regions\" \"r\"")
+        .expect("regions join missing");
     assert!(
         customers_join_idx < regions_join_idx,
         "expected parent join before dependent; sql={sql}"

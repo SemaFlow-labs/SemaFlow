@@ -51,6 +51,8 @@ fn inline_registry() -> FlowRegistry {
                     column: "amount".to_string(),
                 },
                 agg: Aggregation::Sum,
+                filter: None,
+                post_expr: None,
                 data_type: Some("double".to_string()),
                 description: Some("sum of amounts".to_string()),
             },
@@ -112,5 +114,4 @@ fn flow_schema_includes_dimensions_measures_and_joins() {
 
     let measure_names: Vec<_> = schema.measures.iter().map(|m| m.name.as_str()).collect();
     assert!(measure_names.contains(&"order_total"));
-
 }

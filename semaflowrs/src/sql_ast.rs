@@ -41,6 +41,8 @@ pub enum SqlBinaryOperator {
     Multiply,
     Divide,
     Modulo,
+    And,
+    Or,
     Eq,
     Neq,
     Gt,
@@ -198,11 +200,13 @@ impl<'d> SqlRenderer<'d> {
             },
             SqlExpr::Literal(v) => self.dialect.render_literal(v),
             SqlExpr::Function { func, args } => {
-                let rendered_args: Vec<String> =
-                    args.iter().map(|a| self.render_expr(a)).collect();
+                let rendered_args: Vec<String> = args.iter().map(|a| self.render_expr(a)).collect();
                 self.dialect.render_function(func, rendered_args)
             }
-            SqlExpr::Case { branches, else_expr } => {
+            SqlExpr::Case {
+                branches,
+                else_expr,
+            } => {
                 let mut parts = Vec::new();
                 parts.push("CASE".to_string());
                 for (when, then) in branches {
@@ -222,6 +226,8 @@ impl<'d> SqlRenderer<'d> {
                     SqlBinaryOperator::Multiply => "*",
                     SqlBinaryOperator::Divide => "/",
                     SqlBinaryOperator::Modulo => "%",
+                    SqlBinaryOperator::And => "AND",
+                    SqlBinaryOperator::Or => "OR",
                     SqlBinaryOperator::Eq => "=",
                     SqlBinaryOperator::Neq => "!=",
                     SqlBinaryOperator::Gt => ">",

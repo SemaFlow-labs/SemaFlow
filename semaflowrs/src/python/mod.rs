@@ -98,8 +98,7 @@ fn measures_from_py(
                 map.insert(name, measure.inner);
             } else {
                 let s = dumps(py, &val)?;
-                let measure: crate::flows::Measure =
-                    serde_json::from_str(&s).map_err(py_err)?;
+                let measure: crate::flows::Measure = serde_json::from_str(&s).map_err(py_err)?;
                 map.insert(name, measure);
             }
         }
@@ -212,13 +211,15 @@ pub struct PyMeasure {
 #[pymethods]
 impl PyMeasure {
     #[new]
-    #[pyo3(signature = (expression, agg, data_type=None, description=None))]
+    #[pyo3(signature = (expression, agg, data_type=None, description=None, filter=None, post_expr=None))]
     fn new(
         py: Python<'_>,
         expression: &Bound<'_, PyAny>,
         agg: &str,
         data_type: Option<String>,
         description: Option<String>,
+        filter: Option<&Bound<'_, PyAny>>,
+        post_expr: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let expr = expr_from_py(py, expression)?;
         let agg_enum = match agg {
@@ -234,10 +235,22 @@ impl PyMeasure {
                 )))
             }
         };
+        let filter_expr = if let Some(f) = filter {
+            Some(expr_from_py(py, f)?)
+        } else {
+            None
+        };
+        let post_expr = if let Some(p) = post_expr {
+            Some(expr_from_py(py, p)?)
+        } else {
+            None
+        };
         Ok(Self {
             inner: crate::flows::Measure {
                 expr,
                 agg: agg_enum,
+                filter: filter_expr,
+                post_expr,
                 data_type,
                 description,
             },
@@ -513,9 +526,9 @@ fn build_sql(
     let registry = build_registry(tables, flows);
     let ds = build_data_sources(data_sources)?;
     let builder = SqlBuilder::default();
-    let sql =
-        py.allow_threads(|| builder.build_for_request(&registry, &ds, &request))
-            .map_err(to_validation_err)?;
+    let sql = py
+        .allow_threads(|| builder.build_for_request(&registry, &ds, &request))
+        .map_err(to_validation_err)?;
     tracing::debug!(
         ms = start.elapsed().as_millis(),
         "build_sql (pyfunction) complete"
@@ -603,9 +616,9 @@ impl SemanticFlowHandle {
         let mut registry = FlowRegistry::from_parts(tables, flows_vec);
         let connections = build_data_sources(data_sources)?;
         let validator = Validator::new(connections.clone(), false);
-        py.allow_threads(|| runtime().block_on(async {
-            validator.validate_registry(&mut registry).await
-        }))
+        py.allow_threads(|| {
+            runtime().block_on(async { validator.validate_registry(&mut registry).await })
+        })
         .map_err(to_validation_err)?;
         Ok(Self {
             registry: Arc::new(registry),
@@ -615,18 +628,13 @@ impl SemanticFlowHandle {
 
     #[staticmethod]
     #[pyo3(text_signature = "(flow_dir, data_sources)")]
-    fn from_dir(
-        py: Python<'_>,
-        flow_dir: &str,
-        data_sources: &Bound<'_, PyAny>,
-    ) -> PyResult<Self> {
-        let mut registry =
-            FlowRegistry::load_from_dir(flow_dir).map_err(to_validation_err)?;
+    fn from_dir(py: Python<'_>, flow_dir: &str, data_sources: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut registry = FlowRegistry::load_from_dir(flow_dir).map_err(to_validation_err)?;
         let connections = build_data_sources(data_sources)?;
         let validator = Validator::new(connections.clone(), false);
-        py.allow_threads(|| runtime().block_on(async {
-            validator.validate_registry(&mut registry).await
-        }))
+        py.allow_threads(|| {
+            runtime().block_on(async { validator.validate_registry(&mut registry).await })
+        })
         .map_err(to_validation_err)?;
         Ok(Self {
             registry: Arc::new(registry),
@@ -689,10 +697,7 @@ impl SemanticFlowHandle {
             .map_err(to_validation_err)?;
         let json = py.import_bound("json")?;
         let py_obj = json.call_method1("loads", (rows_json,))?;
-        tracing::debug!(
-            ms = start.elapsed().as_millis(),
-            "execute complete"
-        );
+        tracing::debug!(ms = start.elapsed().as_millis(), "execute complete");
         Ok(py_obj.into_py(py))
     }
 
@@ -715,10 +720,7 @@ impl SemanticFlowHandle {
     /// Get flow schema (dimensions, measures, joins) by name.
     #[pyo3(text_signature = "(self, name)")]
     fn get_flow(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
-        let schema = self
-            .registry
-            .flow_schema(name)
-            .map_err(to_validation_err)?;
+        let schema = self.registry.flow_schema(name).map_err(to_validation_err)?;
         let dict = PyDict::new_bound(py);
         dict.set_item("name", schema.name)?;
         if let Some(desc) = schema.description {

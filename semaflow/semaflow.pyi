@@ -36,6 +36,8 @@ class Measure:
         agg: str,
         data_type: Optional[str] = ...,
         description: Optional[str] = ...,
+        filter: Optional[Any] = ...,
+        post_expr: Optional[Any] = ...,
     ) -> None: ...
 
 class FlowJoin:
