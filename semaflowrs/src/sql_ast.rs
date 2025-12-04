@@ -27,6 +27,11 @@ pub enum SqlExpr {
         agg: Aggregation,
         expr: Box<SqlExpr>,
     },
+    FilteredAggregate {
+        agg: Aggregation,
+        expr: Box<SqlExpr>,
+        filter: Box<SqlExpr>,
+    },
     InList {
         expr: Box<SqlExpr>,
         list: Vec<SqlExpr>,
@@ -247,6 +252,23 @@ impl<'d> SqlRenderer<'d> {
             SqlExpr::Aggregate { agg, expr } => self
                 .dialect
                 .render_aggregation(agg, &self.render_expr(expr)),
+            SqlExpr::FilteredAggregate { agg, expr, filter } => {
+                if self.dialect.supports_filtered_aggregates() {
+                    let agg_sql = self
+                        .dialect
+                        .render_aggregation(agg, &self.render_expr(expr));
+                    format!("{} FILTER (WHERE {})", agg_sql, self.render_expr(filter))
+                } else {
+                    let fallback = SqlExpr::Aggregate {
+                        agg: agg.clone(),
+                        expr: Box::new(SqlExpr::Case {
+                            branches: vec![((*filter.clone()), (*expr.clone()))],
+                            else_expr: Box::new(SqlExpr::Literal(serde_json::Value::Null)),
+                        }),
+                    };
+                    self.render_expr(&fallback)
+                }
+            }
             SqlExpr::InList {
                 expr,
                 list,

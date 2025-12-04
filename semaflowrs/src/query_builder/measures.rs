@@ -35,21 +35,33 @@ pub(crate) fn apply_measure_filter(
     measure: &Measure,
     base_expr: SqlExpr,
     alias: &str,
+    supports_filtered_aggregates: bool,
 ) -> Result<SqlExpr> {
-    let filtered_expr = if let Some(filter) = &measure.filter {
+    if let Some(filter) = &measure.filter {
         let filter = normalize_freeform(filter);
         let filter_sql = expr_to_sql(&filter, alias);
-        SqlExpr::Case {
-            branches: vec![(filter_sql, base_expr)],
-            else_expr: Box::new(SqlExpr::Literal(serde_json::Value::Null)),
+        if supports_filtered_aggregates {
+            Ok(SqlExpr::FilteredAggregate {
+                agg: measure.agg.clone(),
+                expr: Box::new(base_expr),
+                filter: Box::new(filter_sql),
+            })
+        } else {
+            let filtered_expr = SqlExpr::Case {
+                branches: vec![(filter_sql, base_expr)],
+                else_expr: Box::new(SqlExpr::Literal(serde_json::Value::Null)),
+            };
+            Ok(SqlExpr::Aggregate {
+                agg: measure.agg.clone(),
+                expr: Box::new(filtered_expr),
+            })
         }
     } else {
-        base_expr
-    };
-    Ok(SqlExpr::Aggregate {
-        agg: measure.agg.clone(),
-        expr: Box::new(filtered_expr),
-    })
+        Ok(SqlExpr::Aggregate {
+            agg: measure.agg.clone(),
+            expr: Box::new(base_expr),
+        })
+    }
 }
 
 pub(crate) fn resolve_measure_with_posts(

@@ -131,10 +131,8 @@ fn renders_filtered_measure() {
         .build_with_dialect(&registry, &request, &DuckDbDialect)
         .unwrap();
     assert!(
-        sql.contains(
-            "SUM(CASE WHEN (\"o\".\"country\" = 'US') THEN \"o\".\"amount\" ELSE NULL END)"
-        ),
-        "filtered measure not rendered as CASE; sql={sql}"
+        sql.contains("SUM(\"o\".\"amount\") FILTER (WHERE (\"o\".\"country\" = 'US'))"),
+        "filtered measure not rendered with FILTER; sql={sql}"
     );
 }
 
@@ -165,5 +163,38 @@ fn renders_composite_measure_with_safe_divide() {
                 "SUM(\"o\".\"amount\") / NULLIF(COUNT(\"o\".\"id\"), 0) AS \"avg_amount\""
             ),
         "composite measure should divide sum by count; sql={sql}"
+    );
+}
+
+struct NoFilterDialect;
+
+impl semaflow::dialect::Dialect for NoFilterDialect {
+    fn quote_ident(&self, ident: &str) -> String {
+        format!("`{}`", ident)
+    }
+
+    fn render_function(&self, func: &semaflow::flows::Function, args: Vec<String>) -> String {
+        semaflow::dialect::DuckDbDialect.render_function(func, args)
+    }
+}
+
+#[test]
+fn falls_back_to_case_when_filter_not_supported() {
+    let registry = registry_with_measures();
+    let request = QueryRequest {
+        flow: "sales".to_string(),
+        dimensions: vec![],
+        measures: vec!["us_amount".to_string()],
+        filters: vec![],
+        order: vec![],
+        limit: None,
+        offset: None,
+    };
+    let sql = SqlBuilder::default()
+        .build_with_dialect(&registry, &request, &NoFilterDialect)
+        .unwrap();
+    assert!(
+        sql.contains("SUM(CASE WHEN (`o`.`country` = 'US') THEN `o`.`amount` ELSE NULL END)"),
+        "filtered measure should render with CASE when dialect lacks FILTER support; sql={sql}"
     );
 }

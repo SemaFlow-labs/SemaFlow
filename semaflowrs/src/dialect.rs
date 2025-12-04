@@ -8,6 +8,9 @@ pub trait Dialect {
     fn placeholder(&self, _idx: usize) -> String {
         "?".to_string()
     }
+    fn supports_filtered_aggregates(&self) -> bool {
+        false
+    }
     fn render_function(&self, func: &Function, args: Vec<String>) -> String;
     fn render_aggregation(&self, agg: &Aggregation, expr: &str) -> String {
         match agg {
@@ -40,6 +43,10 @@ pub struct DuckDbDialect;
 impl Dialect for DuckDbDialect {
     fn quote_ident(&self, ident: &str) -> String {
         format!("\"{}\"", ident.replace('"', "\"\""))
+    }
+
+    fn supports_filtered_aggregates(&self) -> bool {
+        true
     }
 
     fn render_function(&self, func: &Function, args: Vec<String>) -> String {

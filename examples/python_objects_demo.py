@@ -136,10 +136,10 @@ async def main() -> None:
 
     request = {
         "flow": "sales",
-        "dimensions": ["c.country"],
-        "measures": ["o.order_total", "o.order_count", "o.us_order_total", "o.avg_order_amount", "c.customer_count"],
+        "dimensions": [],
+        "measures": ["o.avg_order_amount"],
         "filters": [],
-        "order": [{"column": "o.order_total", "direction": "desc"}],
+        "order": [{"column": "o.avg_order_amount", "direction": "desc"}],
         "limit": 10,
     }
 

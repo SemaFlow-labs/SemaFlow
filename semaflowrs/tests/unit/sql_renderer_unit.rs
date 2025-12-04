@@ -97,6 +97,31 @@ fn renders_functions_and_not_in_list() {
     assert!(sql.ends_with("LIMIT 5 OFFSET 10"));
 }
 
+#[test]
+fn renders_filtered_aggregate_when_supported() {
+    let dialect = DuckDbDialect;
+    let mut query = SelectQuery::default();
+    query.from = TableRef {
+        name: "orders".to_string(),
+        alias: Some("o".to_string()),
+    };
+    query.select.push(SelectItem {
+        expr: SqlExpr::FilteredAggregate {
+            agg: Aggregation::Sum,
+            expr: Box::new(col("o", "amount")),
+            filter: Box::new(SqlExpr::BinaryOp {
+                op: SqlBinaryOperator::Eq,
+                left: Box::new(col("o", "country")),
+                right: Box::new(SqlExpr::Literal(serde_json::json!("US"))),
+            }),
+        },
+        alias: Some("us_amount".to_string()),
+    });
+
+    let sql = SqlRenderer::new(&dialect).render_select(&query);
+    assert!(sql.contains("SUM(\"o\".\"amount\") FILTER (WHERE (\"o\".\"country\" = 'US'))"));
+}
+
 fn semsem_order(name: &str) -> semaflow::sql_ast::OrderItem {
     semaflow::sql_ast::OrderItem {
         expr: SqlExpr::Column {

@@ -80,6 +80,8 @@ impl SqlBuilder {
             measure_defs.push((measure_name.clone(), alias, measure, true));
         }
 
+        let supports_filtered_aggregates = dialect.supports_filtered_aggregates();
+
         // Auto-include dependent measures referenced by post_expr.
         let mut added: Vec<String> = Vec::new();
         for (_, _, measure, _) in &measure_defs {
@@ -108,7 +110,8 @@ impl SqlBuilder {
             }
             if measure.post_expr.is_none() {
                 let base_expr = expr_to_sql(&measure.expr, alias);
-                let agg_expr = apply_measure_filter(measure, base_expr, alias)?;
+                let agg_expr =
+                    apply_measure_filter(measure, base_expr, alias, supports_filtered_aggregates)?;
                 base_measure_exprs.insert(name.clone(), agg_expr.clone());
                 let qualified = format!("{}.{}", alias, name);
                 base_measure_exprs.insert(qualified, agg_expr);
