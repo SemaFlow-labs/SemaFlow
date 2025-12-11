@@ -1,589 +1,408 @@
-use std::collections::{HashMap, HashSet};
+//! Query planner orchestration.
+//!
+//! This module coordinates the query building process using a unified flow
+//! that decides between flat and pre-aggregated strategies based on fanout analysis.
+
+use std::collections::HashSet;
 
 use crate::error::{Result, SemaflowError};
-use crate::flows::{Filter, QueryRequest, SemanticFlow, SemanticTable};
+use crate::flows::{QueryRequest, SemanticFlow};
 use crate::registry::FlowRegistry;
-use crate::sql_ast::{OrderItem, SelectItem, SelectQuery, SqlExpr, TableRef};
+use crate::sql_ast::{SelectItem, SelectQuery, SqlExpr, TableRef};
 
+use super::analysis::{analyze_multi_grain, MultiGrainAnalysis};
+use super::builders::{
+    build_dimension_select, build_join, build_measure_selects, build_order_items,
+    build_preagg_measure_selects, build_preagg_order_items, validate_non_empty_select,
+};
+use super::components::{resolve_components, QueryComponents};
 use super::filters::render_filter_expr;
-use super::joins::{build_join, select_required_joins};
-use super::measures::{
-    apply_measure_filter, collect_measure_refs, resolve_measure_with_posts,
-    validate_no_measure_refs,
-};
-use super::render::expr_to_sql;
-use super::resolve::{
-    build_alias_map, resolve_dimension, resolve_field_expression, resolve_measure, FieldKind,
+use super::joins::select_required_joins;
+use super::plan::{
+    CteJoin, FinalQueryPlan, FlatPlan, GrainedAggPlan, MultiGrainPlan, QueryPlan,
 };
 
-#[derive(Clone)]
-pub(crate) struct ResolvedDimension {
-    pub name: String,
-    pub alias: String,
-    pub expr: SqlExpr,
-}
-
-#[derive(Clone)]
-pub(crate) struct ResolvedFilter {
-    pub filter: Filter,
-    pub expr: SqlExpr,
-    pub alias: Option<String>,
-}
-
-pub(crate) fn build_query(
+/// Build a query from a flow and request.
+///
+/// This is the main entry point for query building. It:
+/// 1. Resolves all components from the request
+/// 2. Analyzes for multi-grain pre-aggregation needs
+/// 3. Builds flat, multi-grain, or legacy pre-aggregated plan
+/// 4. Converts the plan to a SelectQuery
+pub fn build_query(
     flow: &SemanticFlow,
     registry: &FlowRegistry,
     request: &QueryRequest,
     supports_filtered_aggregates: bool,
 ) -> Result<SelectQuery> {
-    let alias_to_table = build_alias_map(flow, registry)?;
-    let base_alias = flow.base_table.alias.clone();
-    let base_table = alias_to_table.get(&base_alias).ok_or_else(|| {
-        SemaflowError::Validation(format!(
-            "missing base table alias {}",
-            flow.base_table.alias
-        ))
-    })?;
+    // Step 1: Resolve all components
+    let components = resolve_components(flow, registry, request, supports_filtered_aggregates)?;
 
-    let resolved_dimensions = resolve_dimensions(request, flow, registry, &alias_to_table)?;
-    let (measure_defs, base_measure_exprs) = resolve_measures(
-        request,
-        flow,
-        registry,
-        &alias_to_table,
-        supports_filtered_aggregates,
-    )?;
-    let resolved_filters = resolve_filters(request, flow, registry, &alias_to_table)?;
+    // Step 2: Analyze for multi-grain pre-aggregation needs
+    // This handles both multi-table measures AND single-table fanout risk
+    let mg_analysis = analyze_multi_grain(&components, flow)?;
 
-    let join_lookup: HashMap<&str, &crate::flows::FlowJoin> =
-        flow.joins.values().map(|j| (j.alias.as_str(), j)).collect();
-
-    let has_joins = !flow.joins.is_empty();
-    let measures_on_base = measure_defs
-        .iter()
-        .all(|(_, alias, _, _)| *alias == base_alias);
-    let filters_on_join = resolved_filters
-        .iter()
-        .any(|f| f.alias.as_deref() != Some(base_alias.as_str()));
-    let join_compatible = resolved_dimensions
-        .iter()
-        .filter(|d| d.alias != base_alias)
-        .all(|d| {
-            join_lookup
-                .get(d.alias.as_str())
-                .map(|j| j.to_table == base_alias)
-                .unwrap_or(false)
-        })
-        && resolved_filters
-            .iter()
-            .filter(|f| f.alias.as_deref() != Some(base_alias.as_str()))
-            .all(|f| {
-                f.alias
-                    .as_ref()
-                    .and_then(|a| join_lookup.get(a.as_str()))
-                    .map(|j| j.to_table == base_alias)
-                    .unwrap_or(false)
-            });
-
-    let use_preagg = has_joins && measures_on_base && filters_on_join && join_compatible;
-
-    let query = if use_preagg {
-        build_preagg_query(
-            flow,
-            base_table,
-            &base_alias,
-            &resolved_dimensions,
-            &measure_defs,
-            &base_measure_exprs,
-            &resolved_filters,
-            request,
-            &alias_to_table,
-        )?
+    // Step 3: Build appropriate plan
+    let plan = if mg_analysis.needs_multi_grain {
+        // Use new multi-grain path for both multi-table and single-table preagg
+        build_multi_grain_plan(&components, &mg_analysis, flow, registry)?
     } else {
-        build_flat_query(
-            flow,
-            base_table,
-            &base_alias,
-            &resolved_dimensions,
-            &measure_defs,
-            &base_measure_exprs,
-            &resolved_filters,
-            request,
-            registry,
-            &alias_to_table,
-        )?
+        build_flat_plan(&components, flow, registry)?
     };
 
-    Ok(query)
+    // Step 4: Convert to SelectQuery
+    Ok(plan.to_select_query())
 }
 
-fn resolve_dimensions(
-    request: &QueryRequest,
+/// Build a flat query plan (standard SELECT with JOINs).
+fn build_flat_plan(
+    components: &QueryComponents,
     flow: &SemanticFlow,
     registry: &FlowRegistry,
-    alias_to_table: &HashMap<String, &SemanticTable>,
-) -> Result<Vec<ResolvedDimension>> {
-    let mut resolved_dimensions = Vec::new();
-    for dim_name in &request.dimensions {
-        let (_table, alias, dimension) =
-            resolve_dimension(dim_name, flow, registry, alias_to_table)?;
-        resolved_dimensions.push(ResolvedDimension {
-            name: dim_name.clone(),
-            alias: alias.clone(),
-            expr: expr_to_sql(&dimension.expression, &alias),
-        });
-    }
-    Ok(resolved_dimensions)
-}
+) -> Result<QueryPlan> {
+    let mut plan = FlatPlan::new(components.base_table.clone());
 
-fn resolve_measures<'a>(
-    request: &'a QueryRequest,
-    flow: &'a SemanticFlow,
-    registry: &'a FlowRegistry,
-    alias_to_table: &'a HashMap<String, &'a SemanticTable>,
-    supports_filtered_aggregates: bool,
-) -> Result<(
-    Vec<(String, String, &'a crate::flows::Measure, bool)>,
-    HashMap<String, SqlExpr>,
-)> {
-    let mut measure_defs: Vec<(String, String, &crate::flows::Measure, bool)> = Vec::new();
-    for measure_name in &request.measures {
-        let (_table, alias, measure) =
-            resolve_measure(measure_name, flow, registry, alias_to_table)?;
-        measure_defs.push((measure_name.clone(), alias, measure, true));
-    }
-
-    // Auto-include dependent measures referenced by post_expr.
-    let mut added: Vec<String> = Vec::new();
-    for (_, _, measure, _) in &measure_defs {
-        if let Some(post) = &measure.post_expr {
-            collect_measure_refs(post, &mut added);
-        }
-    }
-    let mut seen_extra: HashSet<String> = HashSet::new();
-    for dep in added {
-        if request.measures.contains(&dep) || seen_extra.contains(&dep) {
-            continue;
-        }
-        if let Ok((_table, alias, measure)) = resolve_measure(&dep, flow, registry, alias_to_table)
-        {
-            measure_defs.push((dep.clone(), alias.clone(), measure, false));
-            seen_extra.insert(dep);
-        }
-    }
-
-    let mut base_measure_exprs: HashMap<String, SqlExpr> = HashMap::new();
-    for (name, alias, measure, _) in &measure_defs {
-        if let Some(filter) = &measure.filter {
-            validate_no_measure_refs(filter)?;
-        }
-        if measure.post_expr.is_none() {
-            let base_expr = expr_to_sql(&measure.expr, alias);
-            let agg_expr =
-                apply_measure_filter(measure, base_expr, alias, supports_filtered_aggregates)?;
-            base_measure_exprs.insert(name.clone(), agg_expr.clone());
-            let qualified = format!("{}.{}", alias, name);
-            base_measure_exprs.insert(qualified, agg_expr);
-        }
-    }
-
-    Ok((measure_defs, base_measure_exprs))
-}
-
-fn resolve_filters(
-    request: &QueryRequest,
-    flow: &SemanticFlow,
-    registry: &FlowRegistry,
-    alias_to_table: &HashMap<String, &SemanticTable>,
-) -> Result<Vec<ResolvedFilter>> {
-    let mut resolved_filters = Vec::new();
-    for filter in &request.filters {
-        let (expr, kind, alias) =
-            resolve_field_expression(&filter.field, flow, registry, alias_to_table)?;
-        if matches!(kind, FieldKind::Measure) {
-            return Err(SemaflowError::Validation(
-                "filters on measures are not supported (row-level filters only)".to_string(),
-            ));
-        }
-        resolved_filters.push(ResolvedFilter {
-            filter: filter.clone(),
-            expr,
-            alias,
-        });
-    }
-    Ok(resolved_filters)
-}
-
-fn build_flat_query(
-    flow: &SemanticFlow,
-    base_table: &SemanticTable,
-    base_alias: &str,
-    dimensions: &[ResolvedDimension],
-    measure_defs: &[(String, String, &crate::flows::Measure, bool)],
-    base_measure_exprs: &HashMap<String, SqlExpr>,
-    filters: &[ResolvedFilter],
-    request: &QueryRequest,
-    registry: &FlowRegistry,
-    alias_to_table: &HashMap<String, &SemanticTable>,
-) -> Result<SelectQuery> {
+    // Collect required aliases for join pruning
     let mut required_aliases: HashSet<String> = HashSet::new();
-    required_aliases.insert(base_alias.to_string());
+    required_aliases.insert(components.base_alias.clone());
 
-    let mut query = SelectQuery::default();
-    query.from = TableRef {
-        name: base_table.table.clone(),
-        alias: Some(base_alias.to_string()),
-        subquery: None,
-    };
-
-    for dim in dimensions {
+    // Add dimension selects and group by
+    for dim in &components.dimensions {
         required_aliases.insert(dim.alias.clone());
-        query.group_by.push(dim.expr.clone());
-        query.select.push(SelectItem {
-            expr: dim.expr.clone(),
-            alias: Some(dim.name.clone()),
-        });
+        plan.select.push(build_dimension_select(dim));
+        plan.group_by.push(dim.expr.clone());
     }
 
-    for f in filters {
+    // Add filter expressions
+    for f in &components.filters {
         if let Some(alias) = &f.alias {
             required_aliases.insert(alias.clone());
         }
-        query
-            .filters
-            .push(render_filter_expr(f.expr.clone(), &f.filter));
+        plan.filters.push(render_filter_expr(f.expr.clone(), &f.filter));
     }
 
-    if !request.order.is_empty() {
-        for item in &request.order {
-            let (expr, _, alias) =
-                resolve_field_expression(&item.column, flow, registry, alias_to_table)?;
-            if let Some(alias) = alias {
-                required_aliases.insert(alias);
-            }
-            query.order_by.push(OrderItem {
-                expr,
-                direction: item.direction.clone(),
-            });
+    // Add order by (also track aliases)
+    for item in &components.order {
+        // Extract alias from the expression if it's a column
+        if let SqlExpr::Column { table: Some(t), .. } = &item.expr {
+            required_aliases.insert(t.clone());
         }
     }
+    plan.order_by = build_order_items(components);
+    plan.limit = components.limit;
+    plan.offset = components.offset;
 
-    query.limit = request.limit.map(|v| v as u64);
-    query.offset = request.offset.map(|v| v as u64);
-
-    let required_joins = select_required_joins(flow, &required_aliases, alias_to_table)?;
+    // Build required joins with pruning
+    let alias_to_table_refs: std::collections::HashMap<String, &crate::flows::SemanticTable> =
+        super::resolve::build_alias_map(flow, registry)?;
+    let required_joins = select_required_joins(flow, &required_aliases, &alias_to_table_refs)?;
     for join in required_joins {
-        query.joins.push(build_join(join, alias_to_table)?);
+        plan.joins.push(build_join(join, &components.alias_to_table)?);
     }
 
-    let mut measure_lookup: HashMap<String, (&str, &crate::flows::Measure)> = HashMap::new();
-    for (name, alias, measure, _) in measure_defs {
-        measure_lookup.insert(name.clone(), (alias.as_str(), *measure));
-        let qualified = format!("{}.{}", alias, name);
-        measure_lookup
-            .entry(qualified)
-            .or_insert((alias.as_str(), *measure));
-    }
-    let mut resolved_cache: HashMap<String, SqlExpr> = HashMap::new();
-    let mut stack: Vec<String> = Vec::new();
-    for (name, _, _measure, requested) in measure_defs {
-        let expr = resolve_measure_with_posts(
-            name,
-            &measure_lookup,
-            base_measure_exprs,
-            &mut resolved_cache,
-            &mut stack,
-        )?;
-        if *requested {
-            query.select.push(SelectItem {
-                expr,
-                alias: Some(name.clone()),
-            });
-        }
-    }
+    // Add measure selects
+    let measure_selects = build_measure_selects(
+        &components.measures,
+        &components.base_measure_exprs,
+        true, // only requested
+    )?;
+    plan.select.extend(measure_selects);
 
-    if query.select.is_empty() {
-        return Err(SemaflowError::Validation(
-            "query requires at least one dimension or measure".to_string(),
-        ));
-    }
+    validate_non_empty_select(&plan.select)?;
 
-    Ok(query)
+    Ok(QueryPlan::Flat(plan))
 }
 
-fn build_preagg_query(
+// ============================================================================
+// Multi-Grain Plan Building (unified pre-aggregation for 1+ tables)
+// ============================================================================
+
+/// Build a multi-grain query plan.
+///
+/// This creates one CTE per table with measures, each aggregated to a common grain,
+/// then joins them together in the final query.
+fn build_multi_grain_plan(
+    components: &QueryComponents,
+    analysis: &MultiGrainAnalysis,
     flow: &SemanticFlow,
-    base_table: &SemanticTable,
-    base_alias: &str,
-    dimensions: &[ResolvedDimension],
-    measure_defs: &[(String, String, &crate::flows::Measure, bool)],
-    base_measure_exprs: &HashMap<String, SqlExpr>,
-    filters: &[ResolvedFilter],
-    request: &QueryRequest,
-    alias_to_table: &HashMap<String, &SemanticTable>,
-) -> Result<SelectQuery> {
-    let preagg_alias = "fact_preagg".to_string();
-    let mut needed_join_aliases: HashSet<String> = HashSet::new();
-    for dim in dimensions {
-        if dim.alias != base_alias {
-            needed_join_aliases.insert(dim.alias.clone());
-        }
-    }
-    for f in filters {
-        if let Some(alias) = &f.alias {
-            if alias != base_alias {
-                needed_join_aliases.insert(alias.clone());
-            }
-        }
+    registry: &FlowRegistry,
+) -> Result<QueryPlan> {
+    let base_alias = &components.base_alias;
+
+    // Group measures by their table alias
+    let mut measures_by_alias: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+    for m in &components.measures {
+        measures_by_alias
+            .entry(m.alias.clone())
+            .or_default()
+            .push(m);
     }
 
-    let mut join_by_alias: HashMap<&str, &crate::flows::FlowJoin> = HashMap::new();
-    for join in flow.joins.values() {
-        join_by_alias.insert(join.alias.as_str(), join);
+    // Group dimensions by their table alias
+    let mut dimensions_by_alias: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+    for d in &components.dimensions {
+        dimensions_by_alias
+            .entry(d.alias.clone())
+            .or_default()
+            .push(d);
     }
 
-    let mut join_key_aliases: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
-    for alias in &needed_join_aliases {
-        let join = join_by_alias.get(alias.as_str()).ok_or_else(|| {
-            SemaflowError::Validation(format!("missing join definition for alias {alias}"))
+    // Build a CTE for each table with measures
+    let mut ctes = Vec::new();
+    let mut cte_aliases = Vec::new();
+
+    for (alias, grain) in &analysis.table_grains {
+        let table = components.alias_to_table.get(alias).ok_or_else(|| {
+            SemaflowError::Validation(format!("missing semantic table for alias {}", alias))
         })?;
-        if join.to_table != base_alias {
-            return Err(SemaflowError::Validation(format!(
-                "pre-aggregation currently supports only single-hop joins to the base; {} joins to {}",
-                alias, join.to_table
-            )));
-        }
-        let entries = join_key_aliases
-            .entry(alias.clone())
-            .or_insert_with(Vec::new);
-        for key in &join.join_keys {
-            let col_alias = format!("{}__{}", alias, key.left);
-            entries.push((col_alias, key.left.clone(), key.right.clone()));
-        }
-    }
 
-    let mut preagg = SelectQuery::default();
-    preagg.from = TableRef {
-        name: base_table.table.clone(),
-        alias: Some(base_alias.to_string()),
-        subquery: None,
-    };
+        let from = TableRef {
+            name: table.table.clone(),
+            alias: Some(alias.clone()),
+            subquery: None,
+        };
 
-    for dim in dimensions {
-        if dim.alias == base_alias {
-            preagg.group_by.push(dim.expr.clone());
-            preagg.select.push(SelectItem {
-                expr: dim.expr.clone(),
-                alias: Some(dim.name.clone()),
-            });
-        }
-    }
+        let mut cte = GrainedAggPlan::new(format!("{}_agg", alias), from);
 
-    for (_alias, keys) in &join_key_aliases {
-        for (col_alias, base_col, _right_col) in keys {
+        // Track columns already added to avoid duplicates
+        let mut added_columns: HashSet<String> = HashSet::new();
+
+        // Add grain columns to SELECT and GROUP BY
+        for col_name in &grain.grain_columns {
             let col_expr = SqlExpr::Column {
-                table: Some(base_alias.to_string()),
-                name: base_col.clone(),
+                table: Some(alias.clone()),
+                name: col_name.clone(),
             };
-            preagg.group_by.push(col_expr.clone());
-            preagg.select.push(SelectItem {
-                expr: col_expr,
-                alias: Some(col_alias.clone()),
+            cte.select.push(SelectItem {
+                expr: col_expr.clone(),
+                alias: Some(col_name.clone()),
+            });
+            cte.group_by.push(col_expr);
+            added_columns.insert(col_name.clone());
+        }
+
+        // Add dimensions for this table to the CTE
+        if let Some(table_dims) = dimensions_by_alias.get(alias) {
+            for dim in table_dims {
+                let col_name = extract_column_name(&dim.expr);
+                if !added_columns.contains(&col_name) {
+                    cte.select.push(SelectItem {
+                        expr: dim.expr.clone(),
+                        alias: Some(col_name.clone()),
+                    });
+                    cte.group_by.push(dim.expr.clone());
+                    added_columns.insert(col_name);
+                }
+            }
+        }
+
+        // Add measures for this table
+        if let Some(table_measures) = measures_by_alias.get(alias) {
+            for m in table_measures {
+                if m.measure.post_expr.is_none() {
+                    if let Some(base_expr) = &m.base_expr {
+                        // Extract unqualified measure name for CTE column
+                        let measure_col_name = extract_unqualified_name(&m.name);
+                        cte.select.push(SelectItem {
+                            expr: base_expr.clone(),
+                            alias: Some(measure_col_name),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Add filters for this table
+        for f in &components.filters {
+            if f.alias.as_deref() == Some(alias) {
+                cte.filters.push(render_filter_expr(f.expr.clone(), &f.filter));
+            } else if alias == base_alias && f.alias.is_none() {
+                // Base table gets unqualified filters
+                cte.filters.push(render_filter_expr(f.expr.clone(), &f.filter));
+            }
+        }
+
+        cte_aliases.push(cte.alias.clone());
+        ctes.push(cte);
+    }
+
+    // Build final query
+    let base_cte_alias = format!("{}_agg", base_alias);
+    let mut final_query = FinalQueryPlan::new(base_cte_alias.clone());
+
+    // Build CTE joins (uses join type from flow definition)
+    for spec in &analysis.cte_join_specs {
+        let from_cte_alias = format!("{}_agg", spec.from_alias);
+        let to_cte_alias = format!("{}_agg", spec.to_alias);
+
+        // Only add join if both CTEs exist (i.e., both tables have measures)
+        if cte_aliases.contains(&from_cte_alias) && cte_aliases.contains(&to_cte_alias) {
+            final_query.cte_joins.push(CteJoin {
+                cte_alias: from_cte_alias,
+                to_cte_alias,
+                join_type: spec.join_type.clone(),
+                on: spec.join_keys.clone(),
             });
         }
     }
 
-    for f in filters {
-        match f.alias.as_deref() {
-            Some(alias) if alias != base_alias => {
-                let join = join_by_alias.get(alias).ok_or_else(|| {
-                    SemaflowError::Validation(format!(
-                        "missing join definition for alias {}",
-                        alias
-                    ))
-                })?;
-                let join_table = alias_to_table.get(alias).ok_or_else(|| {
-                    SemaflowError::Validation(format!("missing semantic table for alias {}", alias))
-                })?;
-                let mut sub = SelectQuery::default();
-                sub.from = TableRef {
-                    name: join_table.table.clone(),
-                    alias: Some(alias.to_string()),
-                    subquery: None,
-                };
-                for key in &join.join_keys {
-                    sub.filters.push(SqlExpr::BinaryOp {
-                        op: crate::sql_ast::SqlBinaryOperator::Eq,
-                        left: Box::new(SqlExpr::Column {
-                            table: Some(base_alias.to_string()),
-                            name: key.left.clone(),
-                        }),
-                        right: Box::new(SqlExpr::Column {
-                            table: Some(alias.to_string()),
-                            name: key.right.clone(),
-                        }),
-                    });
-                }
-                sub.filters
-                    .push(render_filter_expr(f.expr.clone(), &f.filter));
-                sub.select.push(SelectItem {
-                    expr: SqlExpr::Literal(serde_json::Value::Bool(true)),
-                    alias: None,
-                });
-                preagg.filters.push(SqlExpr::Exists {
-                    subquery: Box::new(sub),
-                });
-            }
-            _ => {
-                preagg
-                    .filters
-                    .push(render_filter_expr(f.expr.clone(), &f.filter));
-            }
-        }
-    }
+    // Add dimension selects to final query
+    // Base dimensions come from base CTE, joined dimensions need dimension table joins
+    let mut dimension_join_aliases: HashSet<String> = HashSet::new();
 
-    for (name, _alias, measure, _) in measure_defs {
-        if measure.post_expr.is_none() {
-            if let Some(expr) = base_measure_exprs.get(name) {
-                preagg.select.push(SelectItem {
-                    expr: expr.clone(),
-                    alias: Some(name.clone()),
-                });
-            }
-        }
-    }
-
-    let mut outer = SelectQuery::default();
-    outer.from = TableRef {
-        name: String::new(),
-        alias: Some(preagg_alias.clone()),
-        subquery: Some(Box::new(preagg)),
-    };
-
-    let mut added_joins: HashSet<String> = HashSet::new();
-    for dim in dimensions {
-        if dim.alias == base_alias {
-            outer.select.push(SelectItem {
+    for dim in &components.dimensions {
+        if analysis.table_grains.contains_key(&dim.alias) {
+            // Dimension is on a table with measures - reference from its CTE
+            let cte_alias = format!("{}_agg", dim.alias);
+            let col_name = extract_column_name(&dim.expr);
+            final_query.select.push(SelectItem {
                 expr: SqlExpr::Column {
-                    table: Some(preagg_alias.clone()),
-                    name: dim.name.clone(),
+                    table: Some(cte_alias),
+                    name: col_name,
                 },
                 alias: Some(dim.name.clone()),
             });
         } else {
-            if added_joins.insert(dim.alias.clone()) {
-                let join = join_by_alias.get(dim.alias.as_str()).ok_or_else(|| {
-                    SemaflowError::Validation(format!(
-                        "missing join definition for alias {}",
-                        dim.alias
-                    ))
-                })?;
-                let join_table = alias_to_table.get(&dim.alias).ok_or_else(|| {
-                    SemaflowError::Validation(format!(
-                        "missing semantic table for alias {}",
-                        dim.alias
-                    ))
-                })?;
-                let keys = join_key_aliases.get(&dim.alias).ok_or_else(|| {
-                    SemaflowError::Validation(format!("missing join keys for {}", dim.alias))
-                })?;
-                let mut on_clause = Vec::new();
-                for (col_alias, _left_col, right_col) in keys {
-                    on_clause.push(SqlExpr::BinaryOp {
-                        op: crate::sql_ast::SqlBinaryOperator::Eq,
-                        left: Box::new(SqlExpr::Column {
-                            table: Some(preagg_alias.clone()),
-                            name: col_alias.clone(),
-                        }),
-                        right: Box::new(SqlExpr::Column {
-                            table: Some(dim.alias.clone()),
-                            name: right_col.clone(),
-                        }),
-                    });
-                }
-                outer.joins.push(crate::sql_ast::Join {
-                    join_type: match join.join_type {
-                        crate::flows::JoinType::Inner => crate::sql_ast::SqlJoinType::Inner,
-                        crate::flows::JoinType::Left => crate::sql_ast::SqlJoinType::Left,
-                        crate::flows::JoinType::Right => crate::sql_ast::SqlJoinType::Right,
-                        crate::flows::JoinType::Full => crate::sql_ast::SqlJoinType::Full,
-                    },
-                    table: TableRef {
-                        name: join_table.table.clone(),
-                        alias: Some(dim.alias.clone()),
-                        subquery: None,
-                    },
-                    on: on_clause,
-                });
-            }
-
-            outer.select.push(SelectItem {
+            // Dimension is on a dimension-only table - need to join to it
+            dimension_join_aliases.insert(dim.alias.clone());
+            final_query.select.push(SelectItem {
                 expr: dim.expr.clone(),
                 alias: Some(dim.name.clone()),
             });
         }
     }
 
-    let mut outer_base_exprs: HashMap<String, SqlExpr> = HashMap::new();
-    for (name, _alias, measure, _) in measure_defs {
-        if measure.post_expr.is_none() {
-            let col = SqlExpr::Column {
-                table: Some(preagg_alias.clone()),
-                name: name.clone(),
+    // Add dimension table joins (tables without measures)
+    if !dimension_join_aliases.is_empty() {
+        let alias_to_table_refs = super::resolve::build_alias_map(flow, registry)?;
+        let required_joins = select_required_joins(flow, &dimension_join_aliases, &alias_to_table_refs)?;
+        for join in required_joins {
+            // Remap join to reference CTE instead of base table
+            let remapped_join = remap_join_to_cte(join, &base_cte_alias, base_alias, components)?;
+            final_query.dimension_joins.push(remapped_join);
+        }
+    }
+
+    // Add filters for dimension-only tables to the final query
+    for f in &components.filters {
+        let filter_alias = f.alias.as_deref();
+        // Check if this filter is NOT on a table with measures (i.e., not in a CTE)
+        if let Some(alias) = filter_alias {
+            if !analysis.table_grains.contains_key(alias) {
+                // Filter on dimension-only table - add to final query
+                final_query.filters.push(render_filter_expr(f.expr.clone(), &f.filter));
+            }
+        }
+    }
+
+    // Add measure selects to final query
+    for m in &components.measures {
+        if m.requested {
+            let cte_alias = format!("{}_agg", m.alias);
+            if m.measure.post_expr.is_some() {
+                // Post-expr measures need all measures from the same table for resolution
+                let table_measures: Vec<_> = components
+                    .measures
+                    .iter()
+                    .filter(|other| other.alias == m.alias)
+                    .cloned()
+                    .collect();
+                let measure_selects = build_preagg_measure_selects(
+                    &table_measures,
+                    &cte_alias,
+                    &components.base_measure_exprs,
+                )?;
+                // Only add the requested measure's select item
+                for sel in measure_selects {
+                    if sel.alias.as_ref() == Some(&m.name) {
+                        final_query.select.push(sel);
+                        break;
+                    }
+                }
+            } else {
+                // Use unqualified column name to reference CTE column
+                let col_name = extract_unqualified_name(&m.name);
+                final_query.select.push(SelectItem {
+                    expr: SqlExpr::Column {
+                        table: Some(cte_alias),
+                        name: col_name,
+                    },
+                    alias: Some(m.name.clone()),
+                });
+            }
+        }
+    }
+
+    // Add order by, limit, offset
+    final_query.order_by = build_preagg_order_items(components);
+    final_query.limit = components.limit;
+    final_query.offset = components.offset;
+
+    validate_non_empty_select(&final_query.select)?;
+
+    Ok(QueryPlan::MultiGrain(MultiGrainPlan { ctes, final_query }))
+}
+
+/// Remap a join to reference a CTE instead of the base table.
+fn remap_join_to_cte(
+    join: &crate::flows::FlowJoin,
+    cte_alias: &str,
+    base_alias: &str,
+    components: &QueryComponents,
+) -> Result<crate::sql_ast::Join> {
+    let join_table = components.alias_to_table.get(&join.alias).ok_or_else(|| {
+        SemaflowError::Validation(format!("missing semantic table for alias {}", join.alias))
+    })?;
+
+    // Build ON clause - remap base table references to CTE
+    let on_clause: Vec<SqlExpr> = join
+        .join_keys
+        .iter()
+        .map(|k| {
+            let left_table = if &join.to_table == base_alias {
+                cte_alias.to_string()
+            } else {
+                join.to_table.clone()
             };
-            outer_base_exprs.insert(name.clone(), col.clone());
-            let qualified = format!("{}.{}", preagg_alias, name);
-            outer_base_exprs.insert(qualified, col);
-        }
+            SqlExpr::BinaryOp {
+                op: crate::sql_ast::SqlBinaryOperator::Eq,
+                left: Box::new(SqlExpr::Column {
+                    table: Some(left_table),
+                    name: k.left.clone(),
+                }),
+                right: Box::new(SqlExpr::Column {
+                    table: Some(join.alias.clone()),
+                    name: k.right.clone(),
+                }),
+            }
+        })
+        .collect();
+
+    Ok(crate::sql_ast::Join {
+        join_type: join.join_type.clone().into(),
+        table: TableRef {
+            name: join_table.table.clone(),
+            alias: Some(join.alias.clone()),
+            subquery: None,
+        },
+        on: on_clause,
+    })
+}
+
+/// Extract the column name from a SQL expression.
+/// For Column expressions, returns the name. For others, returns a fallback.
+fn extract_column_name(expr: &SqlExpr) -> String {
+    match expr {
+        SqlExpr::Column { name, .. } => name.clone(),
+        _ => "expr".to_string(),
     }
+}
 
-    let mut measure_lookup: HashMap<String, (&str, &crate::flows::Measure)> = HashMap::new();
-    for (name, alias, measure, _) in measure_defs {
-        measure_lookup.insert(name.clone(), (alias.as_str(), *measure));
-        let qualified = format!("{}.{}", alias, name);
-        measure_lookup
-            .entry(qualified)
-            .or_insert((alias.as_str(), *measure));
+/// Extract the unqualified name from a potentially qualified name like "alias.column".
+fn extract_unqualified_name(name: &str) -> String {
+    if let Some(pos) = name.find('.') {
+        name[pos + 1..].to_string()
+    } else {
+        name.to_string()
     }
-
-    let mut resolved_cache: HashMap<String, SqlExpr> = HashMap::new();
-    let mut stack: Vec<String> = Vec::new();
-    for (name, _, _measure, requested) in measure_defs {
-        let expr = resolve_measure_with_posts(
-            name,
-            &measure_lookup,
-            &outer_base_exprs,
-            &mut resolved_cache,
-            &mut stack,
-        )?;
-        if *requested {
-            outer.select.push(SelectItem {
-                expr,
-                alias: Some(name.clone()),
-            });
-        }
-    }
-
-    outer.limit = request.limit.map(|v| v as u64);
-    outer.offset = request.offset.map(|v| v as u64);
-
-    if !request.order.is_empty() {
-        for item in &request.order {
-            outer.order_by.push(OrderItem {
-                expr: SqlExpr::Column {
-                    table: None,
-                    name: item.column.clone(),
-                },
-                direction: item.direction.clone(),
-            });
-        }
-    }
-
-    if outer.select.is_empty() {
-        return Err(SemaflowError::Validation(
-            "query requires at least one dimension or measure".to_string(),
-        ));
-    }
-
-    Ok(outer)
 }

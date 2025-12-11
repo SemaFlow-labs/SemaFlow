@@ -4,9 +4,14 @@ use crate::flows::QueryRequest;
 use crate::registry::FlowRegistry;
 use crate::sql_ast::SqlRenderer;
 
+mod analysis;
+mod builders;
+mod components;
 mod filters;
+mod grain;
 mod joins;
 mod measures;
+mod plan;
 mod planner;
 mod render;
 mod resolve;

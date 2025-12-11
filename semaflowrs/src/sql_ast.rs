@@ -3,6 +3,12 @@ use serde_json::Value;
 use crate::dialect::Dialect;
 use crate::flows::{Aggregation, Function, SortDirection};
 
+/// Sanitize an alias for SQL output by replacing dots with double underscores.
+/// This transforms "c.country" to "c__country" for SQL-safe column aliases.
+fn sanitize_alias(alias: &str) -> String {
+    alias.replace('.', "__")
+}
+
 #[derive(Debug, Clone)]
 pub enum SqlExpr {
     Column {
@@ -123,7 +129,10 @@ impl<'d> SqlRenderer<'d> {
             .map(|item| {
                 let expr_sql = self.render_expr(&item.expr);
                 match &item.alias {
-                    Some(alias) => format!("{expr_sql} AS {}", self.dialect.quote_ident(alias)),
+                    Some(alias) => {
+                        let safe_alias = sanitize_alias(alias);
+                        format!("{expr_sql} AS {}", self.dialect.quote_ident(&safe_alias))
+                    }
                     None => expr_sql,
                 }
             })
@@ -213,7 +222,16 @@ impl<'d> SqlRenderer<'d> {
                     self.dialect.quote_ident(t),
                     self.dialect.quote_ident(name)
                 ),
-                None => self.dialect.quote_ident(name),
+                None => {
+                    // When table is None and name contains a dot, it's an alias reference
+                    // (e.g., ORDER BY "o.order_total") that needs sanitizing
+                    let safe_name = if name.contains('.') {
+                        sanitize_alias(name)
+                    } else {
+                        name.clone()
+                    };
+                    self.dialect.quote_ident(&safe_name)
+                }
             },
             SqlExpr::Literal(v) => self.dialect.render_literal(v),
             SqlExpr::Function { func, args } => {

@@ -303,6 +303,7 @@ impl PyFlowJoin {
                 join_type: jt,
                 join_keys: keys,
                 description,
+                cardinality: None,
             },
             table: semantic_table,
         })
@@ -319,13 +320,14 @@ pub struct PySemanticTable {
 #[pymethods]
 impl PySemanticTable {
     #[new]
-    #[pyo3(signature = (name, data_source, table, primary_key, time_dimension=None, dimensions=None, measures=None, description=None))]
+    #[pyo3(signature = (name, data_source, table, primary_key=None, primary_keys=None, time_dimension=None, dimensions=None, measures=None, description=None))]
     fn new(
         py: Python<'_>,
         name: String,
         data_source: &Bound<'_, PyAny>,
         table: String,
-        primary_key: String,
+        primary_key: Option<String>,
+        primary_keys: Option<Vec<String>>,
         time_dimension: Option<String>,
         dimensions: Option<&Bound<'_, PyAny>>,
         measures: Option<&Bound<'_, PyAny>>,
@@ -338,12 +340,24 @@ impl PySemanticTable {
         };
         let dims = dimensions_from_py(py, dimensions)?;
         let measures = measures_from_py(py, measures)?;
+
+        // Support both primary_key (single) and primary_keys (composite)
+        let pks = match (primary_keys, primary_key) {
+            (Some(keys), _) => keys,
+            (None, Some(key)) => vec![key],
+            (None, None) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "either primary_key or primary_keys must be specified",
+                ))
+            }
+        };
+
         Ok(Self {
             inner: SemanticTable {
                 name,
                 data_source: ds_name,
                 table,
-                primary_key,
+                primary_keys: pks,
                 time_dimension,
                 smallest_time_grain: None,
                 dimensions: dims,
@@ -355,12 +369,13 @@ impl PySemanticTable {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (name, table_handle, primary_key, time_dimension=None, dimensions=None, measures=None, description=None))]
+    #[pyo3(signature = (name, table_handle, primary_key=None, primary_keys=None, time_dimension=None, dimensions=None, measures=None, description=None))]
     fn from_table(
         py: Python<'_>,
         name: String,
         table_handle: PyTableHandle,
-        primary_key: String,
+        primary_key: Option<String>,
+        primary_keys: Option<Vec<String>>,
         time_dimension: Option<String>,
         dimensions: Option<&Bound<'_, PyAny>>,
         measures: Option<&Bound<'_, PyAny>>,
@@ -373,6 +388,7 @@ impl PySemanticTable {
             &data_source_obj,
             table_handle.table,
             primary_key,
+            primary_keys,
             time_dimension,
             dimensions,
             measures,

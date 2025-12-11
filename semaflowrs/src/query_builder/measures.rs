@@ -7,6 +7,9 @@ use crate::sql_ast::SqlExpr;
 use super::render::expr_to_sql;
 use super::render::render_post_expr;
 
+// Re-export from shared module
+pub(crate) use crate::expr_utils::collect_measure_refs;
+
 pub(crate) fn validate_no_measure_refs(expr: &Expr) -> Result<()> {
     match expr {
         Expr::MeasureRef { name } => Err(SemaflowError::Validation(format!(
@@ -103,28 +106,6 @@ pub(crate) fn resolve_measure_with_posts(
         Err(SemaflowError::Validation(format!(
             "measure {name} missing base expression"
         )))
-    }
-}
-
-pub(crate) fn collect_measure_refs(expr: &Expr, out: &mut Vec<String>) {
-    match expr {
-        Expr::MeasureRef { name } => out.push(name.clone()),
-        Expr::Func { args, .. } => args.iter().for_each(|a| collect_measure_refs(a, out)),
-        Expr::Case {
-            branches,
-            else_expr,
-        } => {
-            for b in branches {
-                collect_measure_refs(&b.when, out);
-                collect_measure_refs(&b.then, out);
-            }
-            collect_measure_refs(else_expr, out);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_measure_refs(left, out);
-            collect_measure_refs(right, out);
-        }
-        _ => {}
     }
 }
 

@@ -18,7 +18,7 @@ import httpx
 
 DEFAULT_PAYLOAD: Dict[str, Any] = {
     "dimensions": ["c.country"],
-    "measures": ["o.order_total", "c.customer_count"],
+    "measures": ["o.order_total"],
     "filters": [],
     "order": [{"column": "o.order_total", "direction": "desc"}],
     "limit": 10,
@@ -109,11 +109,7 @@ async def run_stage(
     tasks = []
     for i in range(total_requests):
         scheduled = stage_start + i / rps
-        tasks.append(
-            asyncio.create_task(
-                dispatch_at(scheduled, client, url, payload, timeout, semaphore)
-            )
-        )
+        tasks.append(asyncio.create_task(dispatch_at(scheduled, client, url, payload, timeout, semaphore)))
     results = await asyncio.gather(*tasks)
     summary = summarize(list(results))
     summary["rps_target"] = rps

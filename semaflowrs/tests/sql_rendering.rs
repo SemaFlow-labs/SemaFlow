@@ -1,13 +1,28 @@
+//! Integration tests for SQL AST rendering.
+//!
+//! These tests exercise the SqlRenderer with various query structures.
+
 use semaflow::dialect::DuckDbDialect;
-use semaflow::flows::{Aggregation, Function, TimeGrain};
+use semaflow::flows::{Aggregation, Function, SortDirection, TimeGrain};
 use semaflow::sql_ast::{
-    Join, SelectItem, SelectQuery, SqlBinaryOperator, SqlExpr, SqlJoinType, SqlRenderer, TableRef,
+    Join, OrderItem, SelectItem, SelectQuery, SqlBinaryOperator, SqlExpr, SqlJoinType, SqlRenderer,
+    TableRef,
 };
 
 fn col(table: &str, name: &str) -> SqlExpr {
     SqlExpr::Column {
         table: Some(table.to_string()),
         name: name.to_string(),
+    }
+}
+
+fn order_asc(name: &str) -> OrderItem {
+    OrderItem {
+        expr: SqlExpr::Column {
+            table: None,
+            name: name.to_string(),
+        },
+        direction: SortDirection::Asc,
     }
 }
 
@@ -52,7 +67,7 @@ fn renders_join_group_order_and_aggregates() {
         left: Box::new(col("o", "country")),
         right: Box::new(SqlExpr::Literal(serde_json::json!("US"))),
     });
-    query.order_by.push(semsem_order("country"));
+    query.order_by.push(order_asc("country"));
     query.limit = Some(10);
     query.offset = Some(5);
 
@@ -124,14 +139,4 @@ fn renders_filtered_aggregate_when_supported() {
 
     let sql = SqlRenderer::new(&dialect).render_select(&query);
     assert!(sql.contains("SUM(\"o\".\"amount\") FILTER (WHERE (\"o\".\"country\" = 'US'))"));
-}
-
-fn semsem_order(name: &str) -> semaflow::sql_ast::OrderItem {
-    semaflow::sql_ast::OrderItem {
-        expr: SqlExpr::Column {
-            table: None,
-            name: name.to_string(),
-        },
-        direction: semaflow::flows::SortDirection::Asc,
-    }
 }

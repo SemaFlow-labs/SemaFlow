@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::{Result, SemaflowError};
 use crate::flows::{FlowJoin, JoinType, SemanticFlow, SemanticTable};
-use crate::sql_ast::{Join as AstJoin, SqlBinaryOperator, SqlExpr, SqlJoinType, TableRef};
 
 pub(crate) fn select_required_joins<'a>(
     flow: &'a SemanticFlow,
@@ -55,52 +54,16 @@ pub(crate) fn select_required_joins<'a>(
     Ok(ordered)
 }
 
-pub(crate) fn build_join(
-    join: &FlowJoin,
-    alias_to_table: &HashMap<String, &SemanticTable>,
-) -> Result<AstJoin> {
-    let join_table = alias_to_table.get(&join.alias).ok_or_else(|| {
-        SemaflowError::Validation(format!(
-            "missing semantic table for join alias {}",
-            join.alias
-        ))
-    })?;
-    let mut on_clause = Vec::new();
-    for k in &join.join_keys {
-        on_clause.push(SqlExpr::BinaryOp {
-            op: SqlBinaryOperator::Eq,
-            left: Box::new(SqlExpr::Column {
-                table: Some(join.to_table.clone()),
-                name: k.left.clone(),
-            }),
-            right: Box::new(SqlExpr::Column {
-                table: Some(join.alias.clone()),
-                name: k.right.clone(),
-            }),
-        });
-    }
-    Ok(AstJoin {
-        join_type: match join.join_type {
-            JoinType::Inner => SqlJoinType::Inner,
-            JoinType::Left => SqlJoinType::Left,
-            JoinType::Right => SqlJoinType::Right,
-            JoinType::Full => SqlJoinType::Full,
-        },
-        table: TableRef {
-            name: join_table.table.clone(),
-            alias: Some(join.alias.clone()),
-            subquery: None,
-        },
-        on: on_clause,
-    })
-}
-
 fn safe_to_prune(join: &FlowJoin, alias_to_table: &HashMap<String, &SemanticTable>) -> bool {
     if join.join_type != JoinType::Left {
         return false;
     }
     if let Some(table) = alias_to_table.get(&join.alias) {
-        if join.join_keys.len() == 1 && join.join_keys[0].right == table.primary_key {
+        // Safe to prune if join keys exactly match the primary keys
+        let join_right_keys: std::collections::HashSet<_> =
+            join.join_keys.iter().map(|k| &k.right).collect();
+        let pk_set: std::collections::HashSet<_> = table.primary_keys.iter().collect();
+        if !pk_set.is_empty() && join_right_keys == pk_set {
             return true;
         }
     }

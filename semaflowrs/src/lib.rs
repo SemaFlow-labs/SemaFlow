@@ -3,6 +3,7 @@ pub mod dialect;
 pub mod error;
 pub mod executor;
 pub mod expr_parser;
+pub mod expr_utils;
 pub mod flows;
 #[cfg(feature = "python")]
 pub mod python;

@@ -65,13 +65,26 @@ class FlowHandle:
         return await asyncio.to_thread(self._inner.build_sql, request)
 
     async def execute(self, request: Request):
-        return await asyncio.to_thread(self._inner.execute, request)
+        rows = await asyncio.to_thread(self._inner.execute, request)
+        # Transform result keys from SQL-safe format (c__country) back to qualified format (c.country)
+        return [_unsanitize_keys(row) for row in rows]
 
-    def list_flows(self) -> List[Dict[str, Any]]:
+    def list_flows(self):
+        """Return a list of all flow names in this handle."""
         return self._inner.list_flows()
 
     def get_flow(self, name: str) -> Dict[str, Any]:
+        """Return the flow schema for the given name."""
         return self._inner.get_flow(name)
+
+
+def _unsanitize_keys(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Transform column names from SQL-safe format back to qualified format.
+
+    Converts 'c__country' back to 'c.country' so users receive the same
+    keys they used in the request.
+    """
+    return {k.replace("__", "."): v for k, v in row.items()}
 
 
 def build_flow_handles(flows: Mapping[str, SemanticFlow]) -> FlowHandle:

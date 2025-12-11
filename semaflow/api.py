@@ -34,6 +34,14 @@ try:
 except ImportError as e:  # pragma: no cover - handled at runtime
     raise RuntimeError("fastapi is required; install with `pip install semaflow[api]`") from e
 
+# Use ORJSONResponse if orjson is available (3-10x faster serialization)
+try:
+    import orjson  # noqa: F401 - check if orjson is installed
+    from fastapi.responses import ORJSONResponse
+    _DEFAULT_RESPONSE_CLASS = ORJSONResponse
+except ImportError:
+    _DEFAULT_RESPONSE_CLASS = None  # Use FastAPI default
+
 
 class FilterOp(str, Enum):
     """Supported filter operators for the query endpoint."""
@@ -95,11 +103,13 @@ class QueryPayload(BaseModel):
 
 class FlowList(BaseModel):
     """Response model for listing available flows."""
+
     flows: Dict[str, Optional[str]]
 
 
 class FlowSchemaResponse(BaseModel):
     """Response model describing a single semantic flow exposed by a flow."""
+
     name: str
     description: Optional[str]
     time_dimension: Optional[str]
@@ -164,7 +174,9 @@ def create_router(flows: Any):
                 if not isinstance(dim_name, str):
                     raise HTTPException(status_code=500, detail=f"dimension name missing in flow {name}")
                 dims_map[dim_name] = {
-                    "description": dim.get("description") if isinstance(dim.get("description"), str) else None,
+                    "description": dim.get("description")
+                    if isinstance(dim.get("description"), str)
+                    else None,
                     "data_type": dim.get("data_type") if isinstance(dim.get("data_type"), str) else None,
                 }
 
@@ -176,8 +188,12 @@ def create_router(flows: Any):
                 if not isinstance(measure_name, str):
                     raise HTTPException(status_code=500, detail=f"measure name missing in flow {name}")
                 measures_map[measure_name] = {
-                    "description": measure.get("description") if isinstance(measure.get("description"), str) else None,
-                    "data_type": measure.get("data_type") if isinstance(measure.get("data_type"), str) else None,
+                    "description": measure.get("description")
+                    if isinstance(measure.get("description"), str)
+                    else None,
+                    "data_type": measure.get("data_type")
+                    if isinstance(measure.get("data_type"), str)
+                    else None,
                 }
             return FlowSchemaResponse(
                 name=name,
@@ -203,7 +219,14 @@ def create_router(flows: Any):
 
 
 def create_app(flows: Any):
-    """Create a ready-to-serve ``FastAPI`` app with SemaFlow routes."""
-    app = FastAPI()
+    """Create a ready-to-serve ``FastAPI`` app with SemaFlow routes.
+
+    Uses ORJSONResponse for faster serialization if orjson is installed.
+    Install with: pip install orjson
+    """
+    kwargs = {}
+    if _DEFAULT_RESPONSE_CLASS is not None:
+        kwargs["default_response_class"] = _DEFAULT_RESPONSE_CLASS
+    app = FastAPI(**kwargs)
     app.include_router(create_router(flows))
     return app

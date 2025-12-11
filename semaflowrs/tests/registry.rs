@@ -1,12 +1,16 @@
-use semaflow::flows::{Aggregation, Expr, FlowJoin, FlowTableRef, SemanticFlow, SemanticTable};
+//! Integration tests for the FlowRegistry introspection API.
+
+use semaflow::flows::{
+    Aggregation, Expr, FlowJoin, FlowTableRef, JoinKey, JoinType, SemanticFlow, SemanticTable,
+};
 use semaflow::registry::FlowRegistry;
 
-fn inline_registry() -> FlowRegistry {
+fn introspection_registry() -> FlowRegistry {
     let customers = SemanticTable {
         data_source: "ds1".to_string(),
         name: "customers".to_string(),
         table: "customers".to_string(),
-        primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
         time_dimension: None,
         smallest_time_grain: None,
         dimensions: [(
@@ -29,7 +33,7 @@ fn inline_registry() -> FlowRegistry {
         data_source: "ds1".to_string(),
         name: "orders".to_string(),
         table: "orders".to_string(),
-        primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
         time_dimension: Some("created_at".to_string()),
         smallest_time_grain: None,
         dimensions: [(
@@ -74,11 +78,12 @@ fn inline_registry() -> FlowRegistry {
                 semantic_table: "customers".to_string(),
                 alias: "c".to_string(),
                 to_table: "o".to_string(),
-                join_type: semaflow::flows::JoinType::Left,
-                join_keys: vec![semaflow::flows::JoinKey {
+                join_type: JoinType::Left,
+                join_keys: vec![JoinKey {
                     left: "id".to_string(),
                     right: "id".to_string(),
                 }],
+                cardinality: None,
                 description: Some("customer join".to_string()),
             },
         )]
@@ -92,7 +97,7 @@ fn inline_registry() -> FlowRegistry {
 
 #[test]
 fn list_flow_summaries_returns_names_and_descriptions() {
-    let registry = inline_registry();
+    let registry = introspection_registry();
     let summaries = registry.list_flow_summaries();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].name, "sales");
@@ -101,7 +106,7 @@ fn list_flow_summaries_returns_names_and_descriptions() {
 
 #[test]
 fn flow_schema_includes_dimensions_measures_and_joins() {
-    let registry = inline_registry();
+    let registry = introspection_registry();
     let schema = registry.flow_schema("sales").expect("schema");
     assert_eq!(schema.name, "sales");
     assert_eq!(schema.data_source, "ds1");

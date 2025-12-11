@@ -5,7 +5,8 @@ use anyhow::anyhow;
 
 use crate::data_sources::ConnectionManager;
 use crate::error::{Result, SemaflowError};
-use crate::flows::{Expr, SemanticFlow, SemanticTable};
+use crate::expr_utils::{collect_measure_refs, simple_column_name};
+use crate::flows::{SemanticFlow, SemanticTable};
 use crate::registry::FlowRegistry;
 use crate::schema_cache::{SchemaCache, TableSchema};
 
@@ -61,13 +62,12 @@ impl Validator {
     fn validate_table(&self, table: &SemanticTable, schema: TableSchema) -> Result<()> {
         let column_names: HashSet<_> = schema.columns.iter().map(|c| c.name.clone()).collect();
 
-        self.check(
-            column_names.contains(&table.primary_key),
-            format!(
-                "primary key {} missing on table {}",
-                table.primary_key, table.name
-            ),
-        )?;
+        for pk in &table.primary_keys {
+            self.check(
+                column_names.contains(pk),
+                format!("primary key column {} missing on table {}", pk, table.name),
+            )?;
+        }
 
         for (name, dim) in &table.dimensions {
             if let Some(col) = simple_column_name(&dim.expression) {
@@ -209,15 +209,8 @@ impl Validator {
     }
 }
 
-fn simple_column_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Column { column } => Some(column.as_str()),
-        _ => None,
-    }
-}
-
 fn table_has_column(table: &SemanticTable, col: &str) -> bool {
-    if table.primary_key == col {
+    if table.primary_keys.contains(&col.to_string()) {
         return true;
     }
     if let Some(td) = &table.time_dimension {
@@ -229,26 +222,4 @@ fn table_has_column(table: &SemanticTable, col: &str) -> bool {
         .dimensions
         .values()
         .any(|d| simple_column_name(&d.expression) == Some(col))
-}
-
-fn collect_measure_refs(expr: &Expr, out: &mut Vec<String>) {
-    match expr {
-        Expr::MeasureRef { name } => out.push(name.clone()),
-        Expr::Func { args, .. } => args.iter().for_each(|a| collect_measure_refs(a, out)),
-        Expr::Case {
-            branches,
-            else_expr,
-        } => {
-            for b in branches {
-                collect_measure_refs(&b.when, out);
-                collect_measure_refs(&b.then, out);
-            }
-            collect_measure_refs(else_expr, out);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_measure_refs(left, out);
-            collect_measure_refs(right, out);
-        }
-        _ => {}
-    }
 }

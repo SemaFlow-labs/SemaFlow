@@ -10,7 +10,7 @@ dependencies = [
 
 [project.optional-dependencies]
 duckdb = ["duckdb>=0.10.2"]
-api = ["fastapi[standard]>=0.122.0", "uvicorn[standard]>=0.23.0"]
+api = ["fastapi[standard]>=0.122.0", "uvicorn[standard]>=0.23.0", "orjson>=3.9.0"]
 bigquery = []
 postgres = []
 
