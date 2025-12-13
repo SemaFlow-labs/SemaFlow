@@ -9,7 +9,7 @@
 - [x] BigQuery backend (`--features bigquery`)
 - [x] Python bindings via PyO3 (DataSource.duckdb/postgres/bigquery)
 - [x] Structured logging with tracing
-- [x] Join pruning optimization
+- [x] Join pruning optimisation
 - [x] Filtered aggregates (FILTER WHERE clause)
 - [x] Composite/derived measures
 - [x] **Module restructuring** (feature = file pattern)
@@ -65,7 +65,7 @@ cargo build --features all-backends
 Add Arrow table support for high-performance Python workflows:
 
 ```python
-# Current (JSON serialization)
+# Current (JSON serialisation)
 rows = handle.execute(request)  # list[dict]
 
 # New options
@@ -161,7 +161,7 @@ python/
 ### IDE Integration
 - Language server for flow YAML files
 - VSCode extension with autocomplete
-- Flow visualization
+- Flow visualisation
 
 ### Testing
 - Property-based testing for SQL generation

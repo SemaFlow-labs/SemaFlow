@@ -264,7 +264,7 @@ ORDER BY "o__order_total" DESC
 LIMIT 10
 ```
 
-### Alias Sanitization
+### Alias Sanitisation
 
 Column aliases containing dots are sanitized for SQL compatibility:
 - `c.country` → `c__country` (in SQL)
@@ -290,7 +290,7 @@ pub async fn execute_query(
 
 ### DuckDB Execution
 
-1. Get connection from pool (lazy initialization)
+1. Get connection from pool (lazy initialisation)
 2. Execute SQL query
 3. Convert Arrow batches to JSON rows
 4. Return `Vec<serde_json::Value>`

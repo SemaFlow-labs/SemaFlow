@@ -203,5 +203,5 @@ DuckDbConnection
 ├── path: String (database file path)
 ├── max_concurrency: usize (pool size)
 └── pool: OnceCell<Pool<DuckDB>>
-    └── Lazy initialization on first query
+    └── Lazy initialisation on first query
 ```

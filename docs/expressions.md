@@ -29,7 +29,7 @@ measures:
 Rules:
 - Derived measures cannot reference other derived measures; the planner errors on cycles or derived→derived references.
 - If only `avg_order_amount` is requested, `order_total` and `order_count` are auto-added for computation but only `avg_order_amount` is selected. Requesting `order_total` explicitly will also expose it.
-- Base measures are always materialized; they can be selected directly or used as dependencies in `post_expr`.
+- Base measures are always materialised; they can be selected directly or used as dependencies in `post_expr`.
 
 ## Concise string syntax
 - Supported: simple comparisons (`== != > >= < <=`), measure refs, column refs, literals, and `safe_divide(a, b)`.
