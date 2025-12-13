@@ -1,46 +1,18 @@
-use std::collections::HashMap;
+//! DuckDB backend implementation.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 
-use crate::dialect::{Dialect, DuckDbDialect};
+use crate::dialect::DuckDbDialect;
 use crate::error::{Result, SemaflowError};
 use crate::executor::{ColumnMeta, QueryResult};
 use crate::schema_cache::{ForeignKey, TableSchema};
-use std::time::Instant;
-use tokio::sync::Mutex;
 
-/// Unified interface for all backends (DuckDB for now).
-#[async_trait]
-pub trait BackendConnection: Send + Sync {
-    fn dialect(&self) -> &(dyn Dialect + Send + Sync);
-    async fn fetch_schema(&self, table: &str) -> Result<TableSchema>;
-    async fn execute_sql(&self, sql: &str) -> Result<QueryResult>;
-}
-
-/// Minimal connection manager keyed by data source name.
-#[derive(Clone, Default)]
-pub struct ConnectionManager {
-    connections: HashMap<String, Arc<dyn BackendConnection>>,
-}
-
-impl ConnectionManager {
-    pub fn new() -> Self {
-        Self {
-            connections: HashMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, name: impl Into<String>, conn: Arc<dyn BackendConnection>) {
-        self.connections.insert(name.into(), conn);
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn BackendConnection>> {
-        self.connections.get(name)
-    }
-}
+use super::BackendConnection;
 
 /// DuckDB connection implementing the unified backend trait.
 #[derive(Clone)]
@@ -53,8 +25,10 @@ pub struct DuckDbConnection {
 
 impl DuckDbConnection {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        let path = path.as_ref().to_path_buf();
+        tracing::info!(path = %path.display(), max_concurrency = 16, "creating DuckDB connection");
         Self {
-            database_path: path.as_ref().to_path_buf(),
+            database_path: path,
             dialect: DuckDbDialect,
             limiter: Arc::new(Semaphore::new(16)),
             pool: Arc::new(Mutex::new(Vec::new())),
@@ -63,11 +37,16 @@ impl DuckDbConnection {
 
     /// Configure maximum concurrent executions; callers can tune based on hardware.
     pub fn with_max_concurrency(mut self, max_in_flight: usize) -> Self {
+        tracing::debug!(max_concurrency = max_in_flight, "configuring DuckDB concurrency");
         self.limiter = Arc::new(Semaphore::new(max_in_flight));
         self
     }
 
     async fn acquire_slot(&self) -> Result<SemaphorePermit<'_>> {
+        let available = self.limiter.available_permits();
+        if available == 0 {
+            tracing::debug!("all DuckDB slots in use, waiting for permit");
+        }
         self.limiter
             .acquire()
             .await
@@ -75,9 +54,15 @@ impl DuckDbConnection {
     }
 
     async fn checkout_connection(&self) -> Result<duckdb::Connection> {
-        if let Some(conn) = self.pool.lock().await.pop() {
+        let mut guard = self.pool.lock().await;
+        if let Some(conn) = guard.pop() {
+            let pool_size = guard.len();
+            drop(guard);
+            tracing::trace!(pool_remaining = pool_size, "reusing pooled DuckDB connection");
             return Ok(conn);
         }
+        drop(guard);
+        tracing::debug!(path = %self.database_path.display(), "opening new DuckDB connection");
         duckdb::Connection::open(self.database_path.clone())
             .map_err(|e| SemaflowError::Execution(format!("open duckdb: {e}")))
     }
@@ -85,7 +70,7 @@ impl DuckDbConnection {
 
 #[async_trait]
 impl BackendConnection for DuckDbConnection {
-    fn dialect(&self) -> &(dyn Dialect + Send + Sync) {
+    fn dialect(&self) -> &(dyn crate::dialect::Dialect + Send + Sync) {
         &self.dialect
     }
 

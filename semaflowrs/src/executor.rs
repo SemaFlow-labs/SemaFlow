@@ -1,3 +1,4 @@
+#[cfg(feature = "duckdb")]
 use duckdb::types::Value as DuckValue;
 use serde_json::{Map, Value};
 
@@ -12,6 +13,7 @@ pub struct QueryResult {
     pub rows: Vec<Map<String, Value>>,
 }
 
+#[cfg(feature = "duckdb")]
 pub(crate) fn duck_value_to_json(value: DuckValue) -> Value {
     match value {
         DuckValue::Null => Value::Null,

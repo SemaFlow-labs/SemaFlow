@@ -86,8 +86,8 @@ async def main():
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
-    flow_root = project_root / "examples" / "flows"
-    db_path = project_root / "examples" / "demo_python.duckdb"
+    flow_root = project_root / "examples" / "duckdb" / "flows"
+    db_path = project_root / "examples" / "duckdb" / "benchmark.duckdb"
     seed_duckdb(db_path)
 
     flow = FlowHandle.from_dir(flow_root, [DataSource.duckdb(str(db_path), name="duckdb_local")])

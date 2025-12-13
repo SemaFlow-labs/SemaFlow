@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use anyhow::anyhow;
 
-use crate::data_sources::ConnectionManager;
+use crate::backends::ConnectionManager;
 use crate::error::{Result, SemaflowError};
 use crate::expr_utils::{collect_measure_refs, simple_column_name};
 use crate::flows::{SemanticFlow, SemanticTable};
@@ -25,16 +25,28 @@ impl Validator {
         }
     }
 
+    #[tracing::instrument(skip(self, registry), fields(tables = registry.tables.len(), flows = registry.flows.len()))]
     pub async fn validate_registry(&self, registry: &mut FlowRegistry) -> Result<()> {
+        let start = std::time::Instant::now();
+        tracing::info!("starting registry validation");
+
         for table in registry.tables.values() {
+            tracing::debug!(table = %table.name, "validating table");
             let schema = self.ensure_schema(&table.data_source, &table.table).await?;
             self.validate_table(table, schema)?;
         }
 
         for flow in registry.flows.values() {
+            tracing::debug!(flow = %flow.name, "validating flow");
             self.validate_flow(flow, registry)?;
         }
 
+        tracing::info!(
+            tables = registry.tables.len(),
+            flows = registry.flows.len(),
+            ms = start.elapsed().as_millis(),
+            "registry validation complete"
+        );
         Ok(())
     }
 
@@ -46,12 +58,26 @@ impl Validator {
             .get(data_source, table)
             .cloned()
         {
+            tracing::debug!(data_source = %data_source, table = %table, "schema cache hit");
             return Ok(schema);
         }
+
+        tracing::debug!(data_source = %data_source, table = %table, "schema cache miss, fetching from backend");
         let provider = self.connections.get(data_source).ok_or_else(|| {
+            tracing::warn!(data_source = %data_source, "unknown data source");
             SemaflowError::Validation(format!("unknown data source {data_source}"))
         })?;
+
+        let start = std::time::Instant::now();
         let schema = provider.fetch_schema(table).await?;
+        tracing::debug!(
+            data_source = %data_source,
+            table = %table,
+            columns = schema.columns.len(),
+            ms = start.elapsed().as_millis(),
+            "schema fetched from backend"
+        );
+
         self.cache
             .lock()
             .map_err(|e| SemaflowError::Other(anyhow!("schema cache lock: {e}")))?

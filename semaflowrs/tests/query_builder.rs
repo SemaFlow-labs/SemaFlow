@@ -3,6 +3,8 @@
 //! These tests exercise the public API: SqlBuilder, FlowRegistry, QueryRequest.
 
 use semaflow::dialect::DuckDbDialect;
+#[cfg(feature = "postgres")]
+use semaflow::dialect::PostgresDialect;
 use semaflow::flows::{
     Aggregation, BinaryOp, Expr, FlowJoin, FlowTableRef, Function, JoinKey, JoinType, Measure,
     QueryRequest, SemanticFlow, SemanticTable,
@@ -1039,4 +1041,115 @@ fn falls_back_to_case_when_filter_not_supported() {
         sql.contains("SUM(CASE WHEN (`o`.`country` = 'US') THEN `o`.`amount` ELSE NULL END)"),
         "filtered measure should render with CASE when dialect lacks FILTER support; sql={sql}"
     );
+}
+
+// ============================================================================
+// PostgreSQL Dialect Tests
+// ============================================================================
+
+#[cfg(feature = "postgres")]
+mod postgres_tests {
+    use super::*;
+
+    #[test]
+    fn build_basic_query_with_postgres_dialect() {
+        let registry = fixtures::simple_orders_registry();
+        let request = QueryRequest {
+            flow: "sales".to_string(),
+            dimensions: vec!["country".to_string()],
+            measures: vec!["order_total".to_string()],
+            filters: vec![],
+            order: vec![],
+            limit: Some(10),
+            offset: None,
+        };
+        let sql = SqlBuilder::default()
+            .build_with_dialect(&registry, &request, &PostgresDialect)
+            .unwrap();
+
+        // PostgreSQL uses same quoting as DuckDB
+        assert!(sql.contains("\"o\".\"country\""));
+        assert!(sql.contains("SUM(\"o\".\"amount\")"));
+        assert!(sql.contains("FROM \"orders\" \"o\""));
+        assert!(sql.contains("GROUP BY"));
+        assert!(sql.contains("LIMIT 10"));
+    }
+
+    #[test]
+    fn postgres_renders_filtered_measure_with_filter_syntax() {
+        let registry = fixtures::measures_registry();
+        let request = QueryRequest {
+            flow: "sales".to_string(),
+            dimensions: vec![],
+            measures: vec!["us_amount".to_string()],
+            filters: vec![],
+            order: vec![],
+            limit: None,
+            offset: None,
+        };
+        let sql = SqlBuilder::default()
+            .build_with_dialect(&registry, &request, &PostgresDialect)
+            .unwrap();
+
+        // PostgreSQL supports FILTER (WHERE ...) syntax
+        assert!(
+            sql.contains("SUM(\"o\".\"amount\") FILTER (WHERE (\"o\".\"country\" = 'US'))"),
+            "PostgreSQL should use FILTER syntax for filtered measures; sql={sql}"
+        );
+    }
+
+    #[test]
+    fn postgres_handles_join_with_filters() {
+        let registry = fixtures::orders_with_customers_registry();
+        let request = QueryRequest {
+            flow: "sales".to_string(),
+            dimensions: vec!["c.country".to_string()],
+            measures: vec!["o.order_total".to_string()],
+            filters: vec![semaflow::flows::Filter {
+                field: "c.country".to_string(),
+                op: semaflow::flows::FilterOp::Eq,
+                value: serde_json::json!("US"),
+            }],
+            order: vec![],
+            limit: None,
+            offset: None,
+        };
+        let sql = SqlBuilder::default()
+            .build_with_dialect(&registry, &request, &PostgresDialect)
+            .unwrap();
+
+        // Should include the filter
+        assert!(
+            sql.contains("'US'"),
+            "should include filter value; sql={sql}"
+        );
+        // Should have correct quoting
+        assert!(
+            sql.contains("\"c\".\"country\""),
+            "should use double-quote identifiers; sql={sql}"
+        );
+    }
+
+    #[test]
+    fn postgres_handles_composite_measure() {
+        let registry = fixtures::measures_registry();
+        let request = QueryRequest {
+            flow: "sales".to_string(),
+            dimensions: vec![],
+            measures: vec!["avg_amount".to_string()],
+            filters: vec![],
+            order: vec![],
+            limit: None,
+            offset: None,
+        };
+        let sql = SqlBuilder::default()
+            .build_with_dialect(&registry, &request, &PostgresDialect)
+            .unwrap();
+
+        // Should use safe divide (NULLIF pattern)
+        assert!(
+            sql.contains("NULLIF") || sql.contains("safe_divide"),
+            "composite measure should use safe divide; sql={sql}"
+        );
+    }
 }

@@ -80,10 +80,22 @@ result = await handle.execute({
 ```python
 from semaflow import DataSource, FlowHandle
 
-# Load from YAML definitions
+# DuckDB (default backend)
 handle = FlowHandle.from_dir(
     "path/to/flows",
     [DataSource.duckdb("analytics.duckdb")]
+)
+
+# PostgreSQL backend
+handle = FlowHandle.from_dir(
+    "path/to/flows",
+    [DataSource.postgres("postgres://user:pass@localhost/db", name="postgres_db")]
+)
+
+# BigQuery backend
+handle = FlowHandle.from_dir(
+    "path/to/flows",
+    [DataSource.bigquery("project-id", "dataset", name="bq_source")]
 )
 
 # Or define programmatically
@@ -97,6 +109,19 @@ orders = SemanticTable(
     dimensions={"amount": Dimension("amount")},
     measures={"total": Measure("amount", "sum")}
 )
+```
+
+### Building with Feature Flags
+
+```bash
+# Fast iteration on core logic (~1-2 seconds)
+cargo check --no-default-features
+
+# Test specific backend
+cargo check --features postgres
+
+# Build with all backends
+cargo build --features all-backends
 ```
 
 ### FastAPI Integration
@@ -114,6 +139,7 @@ app = create_app(handle)
 
 - **Multi-table measures**: Query measures from multiple joined tables in a single request
 - **Automatic pre-aggregation**: Detects fanout risk and generates optimized CTEs
-- **Dialect support**: Generates database-specific SQL (currently DuckDB)
+- **Multi-backend support**: DuckDB (default), PostgreSQL, and BigQuery with dialect-aware SQL generation
 - **Type-safe SQL AST**: Builds queries programmatically, not via string concatenation
 - **Async execution**: Non-blocking query execution with connection pooling
+- **Feature flags**: Fast development builds with optional backends (`--no-default-features`)

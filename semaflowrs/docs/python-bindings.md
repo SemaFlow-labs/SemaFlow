@@ -16,28 +16,48 @@ pip install semaflow[api]
 
 ### DataSource
 
-Represents a database connection configuration.
+Represents a database connection configuration. Multiple backends are supported.
 
 ```python
 from semaflow import DataSource
 
-# DuckDB connection
+# DuckDB connection (default backend)
 ds = DataSource.duckdb("path/to/database.duckdb", name="my_db")
 
 # With connection pool limit
 ds = DataSource.duckdb("analytics.duckdb", name="analytics", max_concurrency=4)
 
-# Generic constructor
-ds = DataSource(name="my_db", uri="path/to/database.duckdb")
+# PostgreSQL connection
+ds = DataSource.postgres(
+    "postgres://user:pass@localhost:5432/mydb",
+    name="postgres_db"
+)
+
+# BigQuery connection (uses Application Default Credentials)
+ds = DataSource.bigquery(
+    project_id="my-gcp-project",
+    dataset="analytics",
+    name="bq_source"
+)
 ```
+
+**Class Methods:**
+
+| Method | Backend | Required Feature |
+|--------|---------|------------------|
+| `DataSource.duckdb(path, name, max_concurrency=None)` | DuckDB | `duckdb` (default) |
+| `DataSource.postgres(connection_string, name)` | PostgreSQL | `postgres` |
+| `DataSource.bigquery(project_id, dataset, name)` | BigQuery | `bigquery` |
 
 **Attributes:**
 - `name: str` - Connection identifier used in table definitions
 - `uri: str` - Database path or connection string
-- `max_concurrency: Optional[int]` - Connection pool size
+- `max_concurrency: Optional[int]` - Connection pool size (DuckDB only)
 
 **Methods:**
 - `table(name: str) -> TableHandle` - Create a table reference for this data source
+
+**Note:** Each backend requires its corresponding Cargo feature to be enabled at build time. The Python wheel built with `--features all-backends` includes all three.
 
 ---
 

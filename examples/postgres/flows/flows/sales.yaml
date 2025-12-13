@@ -1,0 +1,14 @@
+name: sales
+description: Sales analytics flow - orders joined with customers
+base_table:
+  semantic_table: orders
+  alias: o
+joins:
+  customers:
+    semantic_table: customers
+    alias: c
+    to_table: o
+    join_type: left
+    join_keys:
+      - left: customer_id
+        right: id

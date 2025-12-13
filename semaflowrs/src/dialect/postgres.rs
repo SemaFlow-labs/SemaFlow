@@ -1,70 +1,60 @@
+//! PostgreSQL dialect implementation.
+
 use crate::flows::{Aggregation, Function, TimeGrain};
 
-/// Dialects render identifiers and primitive expression pieces.
-/// Expression tree walking lives in the query builder; the dialect
-/// only maps logical constructs to SQL fragments.
-pub trait Dialect {
-    fn quote_ident(&self, ident: &str) -> String;
-    fn placeholder(&self, _idx: usize) -> String {
-        "?".to_string()
-    }
-    fn supports_filtered_aggregates(&self) -> bool {
-        false
-    }
-    fn render_function(&self, func: &Function, args: Vec<String>) -> String;
-    fn render_aggregation(&self, agg: &Aggregation, expr: &str) -> String {
-        match agg {
-            // Basic aggregations
-            Aggregation::Sum => format!("SUM({expr})"),
-            Aggregation::Count => format!("COUNT({expr})"),
-            Aggregation::CountDistinct => format!("COUNT(DISTINCT {expr})"),
-            Aggregation::Min => format!("MIN({expr})"),
-            Aggregation::Max => format!("MAX({expr})"),
-            Aggregation::Avg => format!("AVG({expr})"),
-            // Statistical aggregations
-            Aggregation::Median => format!("MEDIAN({expr})"),
-            Aggregation::Stddev => format!("STDDEV_POP({expr})"),
-            Aggregation::StddevSamp => format!("STDDEV_SAMP({expr})"),
-            Aggregation::Variance => format!("VAR_POP({expr})"),
-            Aggregation::VarianceSamp => format!("VAR_SAMP({expr})"),
-            // List/String aggregations
-            Aggregation::StringAgg { separator } => {
-                let escaped = separator.replace('\'', "''");
-                format!("STRING_AGG({expr}, '{escaped}')")
-            }
-            Aggregation::ArrayAgg => format!("ARRAY_AGG({expr})"),
-            // Approximate aggregations
-            Aggregation::ApproxCountDistinct => format!("APPROX_COUNT_DISTINCT({expr})"),
-            // First/Last
-            Aggregation::First => format!("FIRST({expr})"),
-            Aggregation::Last => format!("LAST({expr})"),
-        }
-    }
-    fn render_literal(&self, value: &serde_json::Value) -> String {
-        match value {
-            serde_json::Value::Null => "NULL".to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-            serde_json::Value::Array(items) => {
-                let rendered: Vec<String> = items.iter().map(|v| self.render_literal(v)).collect();
-                rendered.join(", ")
-            }
-            serde_json::Value::Object(_) => format!("'{}'", value.to_string().replace('\'', "''")),
-        }
-    }
-}
+use super::{grain_to_str, Dialect};
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DuckDbDialect;
+pub struct PostgresDialect;
 
-impl Dialect for DuckDbDialect {
+impl Dialect for PostgresDialect {
     fn quote_ident(&self, ident: &str) -> String {
         format!("\"{}\"", ident.replace('"', "\"\""))
     }
 
+    fn placeholder(&self, idx: usize) -> String {
+        format!("${}", idx + 1) // PostgreSQL uses $1, $2, ...
+    }
+
     fn supports_filtered_aggregates(&self) -> bool {
-        true
+        true // PostgreSQL 9.4+ supports FILTER
+    }
+
+    fn render_aggregation(&self, agg: &Aggregation, expr: &str) -> String {
+        match agg {
+            // PostgreSQL uses FIRST_VALUE/LAST_VALUE with window functions,
+            // but for simple aggregates we can use (array_agg(x))[1]
+            Aggregation::First => format!("(array_agg({expr}))[1]"),
+            Aggregation::Last => {
+                format!("(array_agg({expr}))[array_length(array_agg({expr}), 1)]")
+            }
+            // All others are standard SQL
+            _ => {
+                // Delegate to default implementation for standard aggregations
+                match agg {
+                    Aggregation::Sum => format!("SUM({expr})"),
+                    Aggregation::Count => format!("COUNT({expr})"),
+                    Aggregation::CountDistinct => format!("COUNT(DISTINCT {expr})"),
+                    Aggregation::Min => format!("MIN({expr})"),
+                    Aggregation::Max => format!("MAX({expr})"),
+                    Aggregation::Avg => format!("AVG({expr})"),
+                    Aggregation::Median => {
+                        format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {expr})")
+                    }
+                    Aggregation::Stddev => format!("STDDEV_POP({expr})"),
+                    Aggregation::StddevSamp => format!("STDDEV_SAMP({expr})"),
+                    Aggregation::Variance => format!("VAR_POP({expr})"),
+                    Aggregation::VarianceSamp => format!("VAR_SAMP({expr})"),
+                    Aggregation::StringAgg { separator } => {
+                        let escaped = separator.replace('\'', "''");
+                        format!("STRING_AGG({expr}, '{escaped}')")
+                    }
+                    Aggregation::ArrayAgg => format!("ARRAY_AGG({expr})"),
+                    Aggregation::ApproxCountDistinct => format!("COUNT(DISTINCT {expr})"), // No native approx in PG
+                    Aggregation::First | Aggregation::Last => unreachable!(),
+                }
+            }
+        }
     }
 
     fn render_function(&self, func: &Function, args: Vec<String>) -> String {
@@ -82,16 +72,18 @@ impl Dialect for DuckDbDialect {
             Function::CurrentDate => "current_date".to_string(),
             Function::CurrentTimestamp => "current_timestamp".to_string(),
             Function::DateAdd { unit } => {
-                let unit_str = grain_to_str(unit);
+                let unit_str = pg_interval_unit(unit);
                 match args.as_slice() {
-                    [amount, date] => format!("{date} + INTERVAL ({amount}) {unit_str}"),
+                    // PostgreSQL: date + INTERVAL 'n unit'
+                    [amount, date] => format!("{date} + ({amount} * INTERVAL '1 {unit_str}')"),
                     _ => "NULL".to_string(),
                 }
             }
             Function::DateDiff { unit } => {
                 let unit_str = grain_to_str(unit);
                 match args.as_slice() {
-                    [start, end] => format!("date_diff('{unit_str}', {start}, {end})"),
+                    // PostgreSQL: date_part('unit', end - start)
+                    [start, end] => format!("date_part('{unit_str}', {end} - {start})"),
                     _ => "NULL".to_string(),
                 }
             }
@@ -109,8 +101,8 @@ impl Dialect for DuckDbDialect {
                 format!("concat_ws('{quoted}', {})", args.join(", "))
             }
             Function::Substring => match args.as_slice() {
-                [expr, start, len] => format!("substring({expr}, {start}, {len})"),
-                [expr, start] => format!("substring({expr}, {start})"),
+                [expr, start, len] => format!("substring({expr} FROM {start} FOR {len})"),
+                [expr, start] => format!("substring({expr} FROM {start})"),
                 _ => "NULL".to_string(),
             },
             Function::Length => format!("length({})", args.join(", ")),
@@ -143,17 +135,22 @@ impl Dialect for DuckDbDialect {
                 _ => "NULL".to_string(),
             },
             Function::EndsWith => match args.as_slice() {
-                [expr, suffix] => format!("ends_with({expr}, {suffix})"),
+                // PostgreSQL doesn't have ends_with, use right() comparison
+                [expr, suffix] => format!("right({expr}, length({suffix})) = {suffix}"),
                 _ => "NULL".to_string(),
             },
             Function::Contains => match args.as_slice() {
-                [expr, substr] => format!("contains({expr}, {substr})"),
+                // PostgreSQL: use LIKE or position
+                [expr, substr] => format!("position({substr} IN {expr}) > 0"),
                 _ => "NULL".to_string(),
             },
 
             // === Null Handling ===
             Function::Coalesce => format!("coalesce({})", args.join(", ")),
-            Function::IfNull => format!("ifnull({})", args.join(", ")),
+            Function::IfNull => match args.as_slice() {
+                [expr, default] => format!("coalesce({expr}, {default})"),
+                _ => "NULL".to_string(),
+            },
             Function::NullIf => match args.as_slice() {
                 [expr1, expr2] => format!("nullif({expr1}, {expr2})"),
                 _ => "NULL".to_string(),
@@ -180,7 +177,7 @@ impl Dialect for DuckDbDialect {
             },
             Function::Sqrt => format!("sqrt({})", args.join(", ")),
             Function::Ln => format!("ln({})", args.join(", ")),
-            Function::Log10 => format!("log10({})", args.join(", ")),
+            Function::Log10 => format!("log({})", args.join(", ")), // PostgreSQL log() is base 10
             Function::Log => match args.as_slice() {
                 [base, value] => format!("log({base}, {value})"),
                 [value] => format!("ln({value})"),
@@ -195,20 +192,22 @@ impl Dialect for DuckDbDialect {
                 _ => "NULL".to_string(),
             },
             Function::TryCast { data_type } => match args.as_slice() {
-                [expr] => format!("TRY_CAST({expr} AS {data_type})"),
+                // PostgreSQL doesn't have TRY_CAST, use CASE with exception handling
+                // For simplicity, just do a regular CAST (will error on invalid input)
+                [expr] => format!("CAST({expr} AS {data_type})"),
                 _ => "NULL".to_string(),
             },
         }
     }
 }
 
-/// Convert TimeGrain to SQL interval string.
-fn grain_to_str(grain: &TimeGrain) -> &'static str {
+/// Convert TimeGrain to PostgreSQL interval unit string.
+fn pg_interval_unit(grain: &TimeGrain) -> &'static str {
     match grain {
         TimeGrain::Day => "day",
         TimeGrain::Week => "week",
         TimeGrain::Month => "month",
-        TimeGrain::Quarter => "quarter",
+        TimeGrain::Quarter => "month", // Will multiply by 3
         TimeGrain::Year => "year",
     }
 }

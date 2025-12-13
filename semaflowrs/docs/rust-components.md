@@ -8,15 +8,23 @@ semaflowrs/src/
 ├── flows.rs               # Semantic definitions (tables, flows, measures)
 ├── registry.rs            # Flow storage and lookup
 ├── sql_ast.rs             # Typed SQL AST structures
-├── dialect.rs             # Database-specific SQL rendering
-├── executor.rs            # Query execution
-├── data_sources.rs        # Connection management
+├── executor.rs            # Query execution result types
 ├── validation.rs          # Schema validation
 ├── runtime.rs             # Query orchestration
 ├── error.rs               # Error types
 ├── expr_parser.rs         # Expression parsing
 ├── expr_utils.rs          # Expression utilities
 ├── schema_cache.rs        # Database schema caching
+├── dialect/               # Database-specific SQL rendering (feature-gated)
+│   ├── mod.rs             # Dialect trait + feature-gated re-exports
+│   ├── duckdb.rs          # DuckDB SQL rendering (#[cfg(feature = "duckdb")])
+│   ├── postgres.rs        # PostgreSQL SQL rendering (#[cfg(feature = "postgres")])
+│   └── bigquery.rs        # BigQuery SQL rendering (#[cfg(feature = "bigquery")])
+├── backends/              # Connection management (feature-gated)
+│   ├── mod.rs             # BackendConnection trait + ConnectionManager
+│   ├── duckdb.rs          # DuckDB connection + pooling (#[cfg(feature = "duckdb")])
+│   ├── postgres.rs        # PostgreSQL connection (deadpool) (#[cfg(feature = "postgres")])
+│   └── bigquery.rs        # BigQuery client (#[cfg(feature = "bigquery")])
 ├── python/
 │   └── mod.rs             # PyO3 bindings
 └── query_builder/
@@ -32,6 +40,32 @@ semaflowrs/src/
     ├── render.rs          # Expression to SQL conversion
     ├── resolve.rs         # Field resolution
     └── grain.rs           # Cardinality inference
+```
+
+### Feature Flags
+
+Each backend is compiled only when its feature is enabled:
+
+```toml
+[features]
+default = ["duckdb"]        # DuckDB on by default for backwards compat
+duckdb = ["dep:duckdb"]     # Now optional!
+postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
+bigquery = ["dep:gcp-bigquery-client"]
+python = ["dep:pyo3"]
+all-backends = ["duckdb", "postgres", "bigquery"]
+```
+
+**Development workflow:**
+```bash
+# Fast iteration on core logic (~1-2 seconds)
+cargo check --no-default-features
+
+# Test specific backend
+cargo check --features postgres
+
+# Full build with all backends
+cargo build --features all-backends
 ```
 
 ---
@@ -304,36 +338,86 @@ impl SqlRenderer {
 
 ---
 
-## Dialect (`dialect.rs`)
+## Dialect (`dialect/`)
+
+The dialect module is organized as a directory with feature-gated implementations:
+
+```
+dialect/
+├── mod.rs         # Dialect trait + feature-gated re-exports
+├── duckdb.rs      # #[cfg(feature = "duckdb")]
+├── postgres.rs    # #[cfg(feature = "postgres")]
+└── bigquery.rs    # #[cfg(feature = "bigquery")]
+```
+
+### Dialect Trait
 
 ```rust
 pub trait Dialect: Send + Sync {
     fn quote_ident(&self, ident: &str) -> String;
+    fn placeholder(&self, idx: usize) -> String;  // "?" for DuckDB, "$1" for Postgres
     fn render_literal(&self, value: &Value) -> String;
     fn render_function(&self, func: &Function, args: Vec<String>) -> String;
     fn render_aggregation(&self, agg: &Aggregation, expr: &str) -> String;
     fn supports_filtered_aggregates(&self) -> bool;
 }
-
-pub struct DuckDbDialect;
-// Implements Dialect with DuckDB-specific SQL
 ```
+
+### Available Dialects
+
+| Dialect | Feature Flag | Identifier Quoting | Filtered Aggregates |
+|---------|--------------|-------------------|---------------------|
+| `DuckDbDialect` | `duckdb` | `"column"` | ✓ |
+| `PostgresDialect` | `postgres` | `"column"` | ✓ |
+| `BigQueryDialect` | `bigquery` | `` `column` `` | ✗ (uses CASE WHEN) |
 
 ---
 
-## Execution (`executor.rs`, `data_sources.rs`)
+## Backends (`backends/`)
+
+The backends module is organized as a directory with feature-gated implementations:
+
+```
+backends/
+├── mod.rs         # BackendConnection trait + ConnectionManager
+├── duckdb.rs      # #[cfg(feature = "duckdb")]
+├── postgres.rs    # #[cfg(feature = "postgres")]
+└── bigquery.rs    # #[cfg(feature = "bigquery")]
+```
+
+### BackendConnection Trait
+
+```rust
+#[async_trait]
+pub trait BackendConnection: Send + Sync {
+    fn dialect(&self) -> &(dyn Dialect + Send + Sync);
+    async fn fetch_schema(&self, table: &str) -> Result<TableSchema>;
+    async fn execute_sql(&self, sql: &str) -> Result<QueryResult>;
+}
+```
 
 ### ConnectionManager
 
 ```rust
-pub type ConnectionManager = HashMap<String, Arc<dyn BackendConnection>>;
+#[derive(Clone, Default)]
+pub struct ConnectionManager {
+    connections: HashMap<String, Arc<dyn BackendConnection>>,
+}
 
-pub trait BackendConnection: Send + Sync {
-    fn execute(&self, sql: &str) -> BoxFuture<'_, Result<Vec<Value>>>;
-    fn get_schema(&self, table: &str) -> BoxFuture<'_, Result<TableSchema>>;
-    fn dialect(&self) -> Box<dyn Dialect>;
+impl ConnectionManager {
+    pub fn new() -> Self;
+    pub fn register(&mut self, name: String, connection: Arc<dyn BackendConnection>);
+    pub fn get(&self, name: &str) -> Option<Arc<dyn BackendConnection>>;
 }
 ```
+
+### Available Backends
+
+| Backend | Feature Flag | Connection Pool | Notes |
+|---------|--------------|-----------------|-------|
+| `DuckDbConnection` | `duckdb` | Custom semaphore-based | Bundled libduckdb |
+| `PostgresConnection` | `postgres` | deadpool-postgres | Async with tokio |
+| `BigQueryConnection` | `bigquery` | N/A (HTTP client) | Uses gcp-bigquery-client |
 
 ### DuckDbConnection
 
@@ -350,15 +434,37 @@ impl DuckDbConnection {
 }
 ```
 
+### PostgresConnection
+
+```rust
+pub struct PostgresConnection {
+    pool: Pool,
+    dialect: PostgresDialect,
+}
+
+impl PostgresConnection {
+    pub async fn new(connection_string: &str) -> Result<Self>;
+}
+```
+
+### BigQueryConnection
+
+```rust
+pub struct BigQueryConnection {
+    client: Client,
+    project_id: String,
+    dataset: String,
+    dialect: BigQueryDialect,
+}
+
+impl BigQueryConnection {
+    pub async fn new(project_id: &str, dataset: &str) -> Result<Self>;
+}
+```
+
 ### Query Execution
 
 ```rust
-pub async fn execute_query(
-    connections: &ConnectionManager,
-    data_source: &str,
-    sql: &str,
-) -> Result<QueryResult>;
-
 pub struct QueryResult {
     pub rows: Vec<Value>,
     pub sql: String,

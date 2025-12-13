@@ -1,5 +1,5 @@
 name: sales
-description: Sales data for the company
+description: Sales analytics flow - orders joined with customers
 base_table:
   semantic_table: orders
   alias: o

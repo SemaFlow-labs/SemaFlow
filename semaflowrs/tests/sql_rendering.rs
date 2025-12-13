@@ -3,6 +3,8 @@
 //! These tests exercise the SqlRenderer with various query structures.
 
 use semaflow::dialect::DuckDbDialect;
+#[cfg(feature = "postgres")]
+use semaflow::dialect::PostgresDialect;
 use semaflow::flows::{Aggregation, Function, SortDirection, TimeGrain};
 use semaflow::sql_ast::{
     Join, OrderItem, SelectItem, SelectQuery, SqlBinaryOperator, SqlExpr, SqlJoinType, SqlRenderer,
@@ -139,4 +141,119 @@ fn renders_filtered_aggregate_when_supported() {
 
     let sql = SqlRenderer::new(&dialect).render_select(&query);
     assert!(sql.contains("SUM(\"o\".\"amount\") FILTER (WHERE (\"o\".\"country\" = 'US'))"));
+}
+
+// ============================================================================
+// PostgreSQL Dialect Tests
+// ============================================================================
+
+#[cfg(feature = "postgres")]
+mod postgres_tests {
+    use super::*;
+
+    #[test]
+    fn renders_postgres_date_trunc() {
+        let dialect = PostgresDialect;
+        let mut query = SelectQuery::default();
+        query.from = TableRef {
+            name: "orders".to_string(),
+            alias: Some("o".to_string()),
+            subquery: None,
+        };
+        query.select.push(SelectItem {
+            expr: SqlExpr::Function {
+                func: Function::DateTrunc(TimeGrain::Month),
+                args: vec![col("o", "created_at")],
+            },
+            alias: Some("month".to_string()),
+        });
+
+        let sql = SqlRenderer::new(&dialect).render_select(&query);
+        // PostgreSQL uses same date_trunc syntax as DuckDB
+        assert!(sql.contains("date_trunc('month', \"o\".\"created_at\") AS \"month\""));
+    }
+
+    #[test]
+    fn renders_postgres_filtered_aggregate() {
+        let dialect = PostgresDialect;
+        let mut query = SelectQuery::default();
+        query.from = TableRef {
+            name: "orders".to_string(),
+            alias: Some("o".to_string()),
+            subquery: None,
+        };
+        query.select.push(SelectItem {
+            expr: SqlExpr::FilteredAggregate {
+                agg: Aggregation::Sum,
+                expr: Box::new(col("o", "amount")),
+                filter: Box::new(SqlExpr::BinaryOp {
+                    op: SqlBinaryOperator::Eq,
+                    left: Box::new(col("o", "country")),
+                    right: Box::new(SqlExpr::Literal(serde_json::json!("US"))),
+                }),
+            },
+            alias: Some("us_amount".to_string()),
+        });
+
+        let sql = SqlRenderer::new(&dialect).render_select(&query);
+        // PostgreSQL 9.4+ supports FILTER syntax
+        assert!(sql.contains("SUM(\"o\".\"amount\") FILTER (WHERE (\"o\".\"country\" = 'US'))"));
+    }
+
+    #[test]
+    fn renders_postgres_median_as_percentile_cont() {
+        let dialect = PostgresDialect;
+        let mut query = SelectQuery::default();
+        query.from = TableRef {
+            name: "orders".to_string(),
+            alias: Some("o".to_string()),
+            subquery: None,
+        };
+        query.select.push(SelectItem {
+            expr: SqlExpr::Aggregate {
+                agg: Aggregation::Median,
+                expr: Box::new(col("o", "amount")),
+            },
+            alias: Some("median_amount".to_string()),
+        });
+
+        let sql = SqlRenderer::new(&dialect).render_select(&query);
+        // PostgreSQL uses PERCENTILE_CONT for MEDIAN
+        assert!(
+            sql.contains("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY \"o\".\"amount\")"),
+            "PostgreSQL should render MEDIAN as PERCENTILE_CONT; sql={sql}"
+        );
+    }
+
+    #[test]
+    fn renders_postgres_first_as_array_agg() {
+        let dialect = PostgresDialect;
+        let mut query = SelectQuery::default();
+        query.from = TableRef {
+            name: "orders".to_string(),
+            alias: Some("o".to_string()),
+            subquery: None,
+        };
+        query.select.push(SelectItem {
+            expr: SqlExpr::Aggregate {
+                agg: Aggregation::First,
+                expr: Box::new(col("o", "amount")),
+            },
+            alias: Some("first_amount".to_string()),
+        });
+
+        let sql = SqlRenderer::new(&dialect).render_select(&query);
+        // PostgreSQL uses (array_agg(x))[1] for FIRST
+        assert!(
+            sql.contains("(array_agg(\"o\".\"amount\"))[1]"),
+            "PostgreSQL should render FIRST as array_agg[1]; sql={sql}"
+        );
+    }
+
+    fn col(table: &str, name: &str) -> SqlExpr {
+        SqlExpr::Column {
+            table: Some(table.to_string()),
+            name: name.to_string(),
+        }
+    }
 }

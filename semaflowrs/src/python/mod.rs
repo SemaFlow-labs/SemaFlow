@@ -1,7 +1,7 @@
-//! Python bindings (PyO3) for SemaFlow core. DuckDB-only for now.
+//! Python bindings (PyO3) for SemaFlow core.
 
 use crate::{
-    data_sources::{ConnectionManager, DuckDbConnection},
+    backends::ConnectionManager,
     flows::{
         Aggregation, Dimension, Expr, FlowJoin, FlowTableRef, SemanticFlow as CoreSemanticFlow,
         SemanticTable,
@@ -12,6 +12,8 @@ use crate::{
     validation::Validator,
     QueryRequest, SemaflowError,
 };
+#[cfg(feature = "duckdb")]
+use crate::backends::DuckDbConnection;
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -117,6 +119,10 @@ pub struct PyDataSource {
     pub uri: String,
     #[pyo3(get)]
     pub max_concurrency: Option<usize>,
+    #[pyo3(get)]
+    pub backend_type: String,
+    #[pyo3(get)]
+    pub schema: Option<String>,
 }
 
 #[pymethods]
@@ -128,9 +134,12 @@ impl PyDataSource {
             name,
             uri,
             max_concurrency,
+            backend_type: "duckdb".to_string(),
+            schema: None,
         }
     }
 
+    /// Create a DuckDB data source.
     #[staticmethod]
     #[pyo3(signature = (path, name=None, max_concurrency=None))]
     fn duckdb(path: String, name: Option<String>, max_concurrency: Option<usize>) -> Self {
@@ -138,6 +147,62 @@ impl PyDataSource {
             name: name.unwrap_or_else(|| "duckdb".to_string()),
             uri: path,
             max_concurrency,
+            backend_type: "duckdb".to_string(),
+            schema: None,
+        }
+    }
+
+    /// Create a PostgreSQL data source.
+    ///
+    /// Args:
+    ///     connection_string: PostgreSQL connection string (URL or key-value format)
+    ///     schema: PostgreSQL schema name (e.g., "public")
+    ///     name: Optional data source name (defaults to "postgres")
+    ///     max_concurrency: Optional max pool size
+    #[staticmethod]
+    #[pyo3(signature = (connection_string, schema, name=None, max_concurrency=None))]
+    fn postgres(
+        connection_string: String,
+        schema: String,
+        name: Option<String>,
+        max_concurrency: Option<usize>,
+    ) -> Self {
+        Self {
+            name: name.unwrap_or_else(|| "postgres".to_string()),
+            uri: connection_string,
+            max_concurrency,
+            backend_type: "postgres".to_string(),
+            schema: Some(schema),
+        }
+    }
+
+    /// Create a BigQuery data source.
+    ///
+    /// Args:
+    ///     project_id: GCP project ID
+    ///     dataset: BigQuery dataset name
+    ///     service_account_path: Optional path to service account JSON key file.
+    ///                           If not provided, uses application default credentials.
+    ///     name: Optional data source name (defaults to "bigquery")
+    #[staticmethod]
+    #[pyo3(signature = (project_id, dataset, service_account_path=None, name=None))]
+    fn bigquery(
+        project_id: String,
+        dataset: String,
+        service_account_path: Option<String>,
+        name: Option<String>,
+    ) -> Self {
+        // Store project_id|dataset|service_account_path in URI for later parsing
+        let uri = match service_account_path {
+            Some(path) => format!("{}|{}|{}", project_id, dataset, path),
+            None => format!("{}|{}", project_id, dataset),
+        };
+        Self {
+            name: name.unwrap_or_else(|| "bigquery".to_string()),
+            uri,
+            max_concurrency: None,
+            backend_type: "bigquery".to_string(),
+            schema: Some(dataset),
         }
     }
 
@@ -488,15 +553,84 @@ fn build_data_sources(mapping: &Bound<'_, PyAny>) -> PyResult<ConnectionManager>
     if let Ok(list) = mapping.extract::<Vec<PyDataSource>>() {
         let mut ds = ConnectionManager::new();
         for item in list {
-            let mut conn = DuckDbConnection::new(item.uri.clone());
-            if let Some(max) = item.max_concurrency {
-                conn = conn.with_max_concurrency(max);
+            match item.backend_type.as_str() {
+                #[cfg(feature = "duckdb")]
+                "duckdb" => {
+                    let mut conn = DuckDbConnection::new(item.uri.clone());
+                    if let Some(max) = item.max_concurrency {
+                        conn = conn.with_max_concurrency(max);
+                    }
+                    ds.insert(item.name.clone(), Arc::new(conn));
+                }
+                #[cfg(not(feature = "duckdb"))]
+                "duckdb" => {
+                    return Err(PyValueError::new_err(
+                        "DuckDB support not enabled. Rebuild with --features duckdb",
+                    ));
+                }
+                #[cfg(feature = "postgres")]
+                "postgres" => {
+                    use crate::backends::PostgresConnection;
+                    let schema = item.schema.as_deref().ok_or_else(|| {
+                        PyValueError::new_err("postgres data source requires schema parameter")
+                    })?;
+                    let conn = PostgresConnection::new(&item.uri, schema).map_err(py_err)?;
+                    ds.insert(item.name.clone(), Arc::new(conn));
+                }
+                #[cfg(not(feature = "postgres"))]
+                "postgres" => {
+                    return Err(PyValueError::new_err(
+                        "PostgreSQL support not enabled. Rebuild with --features postgres",
+                    ));
+                }
+                #[cfg(feature = "bigquery")]
+                "bigquery" => {
+                    use crate::backends::BigQueryConnection;
+                    // Parse URI format: project_id|dataset|optional_service_account_path
+                    let parts: Vec<&str> = item.uri.split('|').collect();
+                    if parts.len() < 2 {
+                        return Err(PyValueError::new_err(
+                            "BigQuery URI must contain project_id|dataset",
+                        ));
+                    }
+                    let project_id = parts[0];
+                    let dataset = parts[1];
+
+                    let conn = if parts.len() >= 3 && !parts[2].is_empty() {
+                        // Service account key file provided
+                        runtime()
+                            .block_on(BigQueryConnection::from_service_account_key_file(
+                                parts[2], project_id, dataset,
+                            ))
+                            .map_err(py_err)?
+                    } else {
+                        // Use application default credentials
+                        runtime()
+                            .block_on(BigQueryConnection::from_application_default_credentials(
+                                project_id, dataset,
+                            ))
+                            .map_err(py_err)?
+                    };
+                    ds.insert(item.name.clone(), Arc::new(conn));
+                }
+                #[cfg(not(feature = "bigquery"))]
+                "bigquery" => {
+                    return Err(PyValueError::new_err(
+                        "BigQuery support not enabled. Rebuild with --features bigquery",
+                    ));
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown backend_type: {other}. Supported: duckdb, postgres, bigquery"
+                    )));
+                }
             }
-            ds.insert(item.name.clone(), Arc::new(conn));
         }
         return Ok(ds);
     }
 
+    // Legacy dict format: name -> duckdb_path (only when duckdb feature enabled)
+    #[cfg(feature = "duckdb")]
     if let Ok(dict) = mapping.extract::<std::collections::HashMap<String, String>>() {
         let mut ds = ConnectionManager::new();
         for (name, path) in dict {
@@ -505,8 +639,15 @@ fn build_data_sources(mapping: &Bound<'_, PyAny>) -> PyResult<ConnectionManager>
         return Ok(ds);
     }
 
+    #[cfg(not(feature = "duckdb"))]
+    if mapping.extract::<std::collections::HashMap<String, String>>().is_ok() {
+        return Err(PyValueError::new_err(
+            "dict[name -> path] format requires DuckDB. Rebuild with --features duckdb or use list[DataSource]",
+        ));
+    }
+
     Err(PyValueError::new_err(
-        "data_sources must be dict[name -> path] or list[DataSource]",
+        "data_sources must be list[DataSource] or dict[name -> duckdb_path]",
     ))
 }
 

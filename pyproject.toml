@@ -1,7 +1,7 @@
 [project]
 name = "semaflow"
 version = "0.1.0"
-description = "Add your description here"
+description = "Semantic layer for analytical databases"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,17 +9,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-duckdb = ["duckdb>=0.10.2"]
+# Python package extras (install-time dependencies)
+# Note: DuckDB/PostgreSQL backends are Rust features (compile-time)
+# These extras are for Python-side tooling
+duckdb = ["duckdb>=0.10.2"]  # Python DuckDB driver for seeding/testing
 api = ["fastapi[standard]>=0.122.0", "uvicorn[standard]>=0.23.0", "orjson>=3.9.0"]
-bigquery = []
-postgres = []
+dev = ["duckdb>=0.10.2", "maturin>=1.10.2", "pytest>=8.0"]
+all = ["semaflow[duckdb,api,dev]"]
 
 [dependency-groups]
 dev = [
     "maturin>=1.10.2",
-]
-api = [
-    "fastapi[standard]>=0.122.0",
+    "duckdb>=0.10.2",
 ]
 
 [build-system]
@@ -28,6 +29,7 @@ build-backend = "maturin"
 
 [tool.maturin]
 manifest-path = "semaflowrs/Cargo.toml"
-features = ["python"]
+# Include all backends in the wheel - users may have multiple data sources
+features = ["python", "postgres"]
 python-source = "."
 python-packages = ["semaflow"]

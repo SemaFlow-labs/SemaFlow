@@ -1,4 +1,4 @@
-pub mod data_sources;
+pub mod backends;
 pub mod dialect;
 pub mod error;
 pub mod executor;
@@ -30,10 +30,25 @@ pub async fn load_and_validate<P: AsRef<Path>>(
 }
 
 pub use crate::validation::Validator;
-pub use data_sources::{BackendConnection, ConnectionManager, DuckDbConnection};
+pub use backends::{BackendConnection, ConnectionManager};
+#[cfg(feature = "duckdb")]
+pub use backends::DuckDbConnection;
+#[cfg(feature = "postgres")]
+pub use backends::PostgresConnection;
+#[cfg(feature = "bigquery")]
+pub use backends::BigQueryConnection;
 pub use error::SemaflowError;
 pub use executor::QueryResult;
 pub use flows::{QueryRequest, SemanticFlow, SemanticTable};
 pub use query_builder::SqlBuilder;
 pub use registry::{DimensionInfo, FlowSchema, FlowSummary, MeasureInfo};
 pub use schema_cache::TableSchema;
+
+// Dialect re-exports
+pub use dialect::Dialect;
+#[cfg(feature = "duckdb")]
+pub use dialect::DuckDbDialect;
+#[cfg(feature = "postgres")]
+pub use dialect::PostgresDialect;
+#[cfg(feature = "bigquery")]
+pub use dialect::BigQueryDialect;

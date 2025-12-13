@@ -22,15 +22,6 @@ measures:
     expr: id
     agg: count
     description: Count of orders
-  distinct_customers:
-    expr: customer_id
-    agg: count_distinct
-    description: Distinct customers ordering
-  us_order_total:
-    expr: amount
-    agg: sum
-    filter: "customer_id == 1"
-    description: Orders for customer_id 1
   avg_order_amount:
     expr: amount
     agg: sum
