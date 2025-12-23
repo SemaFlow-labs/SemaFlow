@@ -1,0 +1,24 @@
+# Shared sales analytics flow
+# Orders joined with customers and products
+name: sales
+description: Sales analytics flow - orders joined with customers and products
+base_table:
+  semantic_table: orders
+  alias: o
+joins:
+  customers:
+    semantic_table: customers
+    alias: c
+    to_table: o
+    join_type: left
+    join_keys:
+      - left: customer_id
+        right: customer_id
+  products:
+    semantic_table: products
+    alias: p
+    to_table: o
+    join_type: left
+    join_keys:
+      - left: product_id
+        right: product_id

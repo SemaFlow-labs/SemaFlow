@@ -1,0 +1,27 @@
+# PostgreSQL for SemaFlow testing
+#
+# Start:   docker compose up -d
+# Stop:    docker compose down
+# Reset:   docker compose down -v && docker compose up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: semaflow-postgres
+    environment:
+      POSTGRES_USER: semaflow
+      POSTGRES_PASSWORD: semaflow_pass
+      POSTGRES_DB: semaflow_demo
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U semaflow -d semaflow_demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

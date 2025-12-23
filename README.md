@@ -1,106 +1,334 @@
-# SemaFlow
+<p align="left">
+  <img src=".github/assets/semaflow-logo.png" alt="SemaFlow" width="300">
+</p>
 
-Semantic layer core in Rust with Python bindings. Defines semantic tables and models, validates them against backends, builds SQL (currently DuckDB), and can execute queries. Everything IO-bound is async.
+**A lightweight, async semantic layer for applications, APIs, and AI agents**
 
-## Architecture at a Glance
+SemaFlow is a semantic layer you integrate as a library — not a platform you operate. Built for **developers** first.
 
-- **Build/Definition**
-  - Data sources: logical connections (DuckDB now; Postgres/BigQuery later).
-  - Semantic tables: `name`, `data_source`, `table`, `primary_key`, `time_dimension`, dimensions, measures (Expr DSL), join keys, descriptions.
-  - Semantic models: base table + joins to other semantic tables; optional always-filters.
-  - Models dictionary: map of model name → semantic model; loaded from YAML or Python.
-- **Startup/Deploy**
-  - Load models dictionary into memory.
-  - Initialize data source connections.
-  - Retrieve table schemas from backends (schema cache keyed by `(data_source, table)`).
-  - Validate semantic tables (fields, PK, time dimension, measure expressions).
-  - Validate semantic models (join keys/types, single data source per model); fail or warn per config.
-  - Expose API surface (planned): `/health`, `/list_models`, `/get_model`, `/{model}/query_model`.
-- **Query/Runtime**
-  - Request parsed into `QueryRequest` (dims, measures, filters, order, limit/offset).
-  - Apply model always-filters; resolve joins from the graph.
-  - Build internal `QueryPlan` (select/from/joins/where/group/order).
-  - Compile to SQL via dialect (`DuckDbDialect` implemented).
-  - Execute against backend executor; return rows as JSON-friendly structures.
-- **Async**
-  - Schema fetch and query execution are async; Python/Rust call paths are async-safe.
+> **Think: dbt metrics, but as a Python library you import.**
+> Or: *Cube, without the infrastructure.*
 
-## Detailed Flow (Mermaid)
+---
 
-### Build / Definition phase
-```mermaid
-flowchart TD
-  A[Start: User begins setup] --> B[Define Data Source Connections]
-  B --> C{Define Semantic Tables<br/>(YAML or Python)}
-  C --> C1[Set: table, primary key,<br/>dimensions, measures,<br/>time grain, descriptions]
-  C --> C2[Reference a data source]
-  C --> D{Define Semantic Models}
-  D --> D1[Choose base Semantic Table]
-  D --> D2[Add joins to other STs]
-  D --> D3[Optional: set always filters]
-  D --> E[Assemble Models Dictionary]
-  E --> F[Expose models dictionary to API builder]
-  F --> G[End of Build Phase]
+## Table of Contents
+
+- [What is SemaFlow?](#what-is-semaflow)
+- [Why SemaFlow?](#why-semaflow)
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [YAML Schema](#yaml-schema)
+- [Documentation](#documentation)
+- [Examples](#examples)
+- [Development](#development)
+- [Roadmap](#roadmap)
+
+---
+
+## What is SemaFlow?
+
+SemaFlow is a **lightweight semantic layer** written in Rust with Python bindings.
+
+Define your semantic layer:
+- **Dimensions** — attributes to group by
+- **Measures** — aggregations and formulas
+- **Joins** — relationships between tables
+- **Time grains** — temporal hierarchies
+
+Then serve semantic queries from:
+- REST APIs
+- Microservices
+- Dashboards
+- AI / LLM agents
+
+All with **async execution, backpressure, and predictable scalability**.
+
+---
+
+## Why SemaFlow?
+
+Most semantic layers today are:
+- BI-first, synchronous, heavy platforms
+- Hard to embed in applications
+- Unsafe under bursty traffic
+- Not designed for AI or agent workloads
+
+SemaFlow is built for a different world:
+- Real-time APIs and microservices
+- Agentic systems with concurrent requests
+- Horizontal scaling with bounded concurrency
+
+### Positioning
+
+```
+                         Heavy Platform
+                             ▲
+                             │
+                 dbt SL      │         Cube
+        Looker               │
+                  Metriql    │
+BI / Analytics               │
+ ────────────────────────────┼────────────────────────────→ App / Infra
+                             │
+                             │        ★ SemaFlow
+                             │    (lightweight library)
+         BSL                 │
+(Boring semantic layer)      │
+                             ▼
+                       Library / SDK
 ```
 
-### Startup / Deploy phase
-```mermaid
-flowchart TD
-  A[API Starts] --> B[Load Models Dictionary into Memory]
-  B --> C[Initialize Data Source Connections]
-  C --> D[Retrieve Table Schemas from Backends]
-  D --> E{Validate Semantic Tables}
-  E --> E1[Check fields exist]
-  E --> E2[Check primary key + time dimension]
-  E --> E3[Validate measure expressions]
-  E --> F{Validate Semantic Models}
-  F --> F1[Verify join keys and types]
-  F --> F2[Apply config: fail or warn]
-  F --> G{Any Validation Failures?}
-  G -->|Yes| H[Startup Error / Abort]
-  G -->|No| I[API Marked Live]
-  I --> J[Expose Endpoints:<br/>/health,<br/>/list_models,<br/>/get_model,<br/>/{model}/query_model]
-  J --> K[Ready for Queries]
+### Key Differentiators
+
+| Feature | Description |
+|---------|-------------|
+| 📦 Lightweight | No control plane, no external dependencies, minimal config |
+| ⚡ Async by design | Rust async runtime with backpressure |
+| 🔌 Library-first | Import and integrate — deploy however you want |
+| 🤖 AI-friendly | Safe for agents, MCP, and LLM tools |
+| 📈 Predictable scaling | Bounded concurrency, connection pooling |
+
+---
+
+## Features
+
+- **Multi-backend support**: DuckDB, PostgreSQL, BigQuery
+- **Semantic modeling**: Define dimensions, measures, and flows in YAML or Python
+- **Automatic optimization**: Join pruning, pre-aggregation CTEs, fanout detection
+- **Type-safe SQL generation**: AST-based SQL building with dialect-aware rendering
+- **Async execution**: Non-blocking queries with connection pooling
+- **Built-in API**: FastAPI integration for instant REST endpoints
+- **Cursor pagination**: Efficient page-by-page results (native BigQuery job pagination)
+- **Formula expressions**: Complex measures with inline aggregations (`formula: "sum(a) / count(b)"`)
+
+---
+
+## Installation
+
+```bash
+pip install semaflow
+
+# With FastAPI support
+pip install "semaflow[api]"
 ```
 
-### Query / Runtime phase
-```mermaid
-flowchart TD
-  A[POST /{model}/query_model] --> B[Lookup Semantic Model]
-  B --> C{Model Found?}
-  C -->|No| Z[Return 404]
-  C -->|Yes| D[Parse Request JSON into QueryRequest]
-  D --> E[Validate fields against Model:<br/>dims, measures, filters]
-  E --> F[Apply Always Filters]
-  F --> G[Resolve Required Joins]
-  G --> H[Build Internal QueryPlan:<br/>select, from, joins,<br/>where, group_by]
-  H --> I[Compile QueryPlan to SQL<br/>(current: DuckDB dialect)]
-  I --> J[Execute SQL Async Against Backend]
-  J --> K[Receive Results]
-  K --> L[Serialize to JSON]
-  L --> M[Return HTTP 200 Response]
+---
+
+## Quick Start
+
+### From YAML Files
+
+```python
+from semaflow import DataSource, FlowHandle
+
+# Connect to your database
+ds = DataSource.duckdb("analytics.duckdb", name="warehouse")
+# Or: DataSource.postgres("postgresql://user:pass@host/db", schema="public", name="warehouse")
+# Or: DataSource.bigquery(project_id="my-project", dataset="analytics", name="warehouse")
+
+# Load semantic definitions
+handle = FlowHandle.from_dir("flows/", [ds])
+
+# Execute queries
+result = await handle.execute({
+    "flow": "sales",
+    "dimensions": ["c.country"],
+    "measures": ["o.order_total", "o.order_count"],
+    "filters": [{"field": "c.country", "op": "==", "value": "US"}],
+    "order": [{"column": "o.order_total", "direction": "desc"}],
+    "limit": 100
+})
 ```
 
-## Components
+### From Python Objects
 
-- **Expr DSL**: columns, literals, CASE, binary ops, functions (date_trunc/part, lower/upper, coalesce/ifnull, now, concat/concat_ws, substring, length, greatest/least, trim/ltrim/rtrim, cast), aggregations (sum, count, count_distinct, min, max, avg).
-- **SQL builder**: `SqlBuilder::build_for_request` renders a `QueryRequest` to SQL with dialect support (DuckDB now).
-- **Validation**: schema checks; join alias uniqueness; join key existence; enforce single data source per model.
-- **Runtime**: `run_query` builds SQL and dispatches to the registered executor for the model’s data source; DuckDB executor included.
-- **Examples**: semantic definitions in `examples/models`, requests in `examples/requests`, shell helper `examples/run_print_sql.sh`, Rust demo `cargo run --example run_query`, Python demo `examples/python_demo.py`.
-- **Python bindings** (feature `python`): PyO3 module `semaflow_core` exposes `build_sql` and `run` (validate + build + execute DuckDB). Wrapper package `semaflow` re-exports `build_sql`, `run_query`, and `load_models_from_dir` with type hints/docstrings.
+```python
+from semaflow import (
+    DataSource, SemanticTable, SemanticFlow,
+    Dimension, Measure, FlowJoin, JoinKey, build_flow_handles
+)
+
+ds = DataSource.duckdb("sales.duckdb", name="warehouse")
+
+orders = SemanticTable(
+    name="orders",
+    data_source=ds,
+    table="fct_orders",
+    primary_key="order_id",
+    dimensions={"status": Dimension("status")},
+    measures={"total": Measure("amount", "sum")}
+)
+
+customers = SemanticTable(
+    name="customers",
+    data_source=ds,
+    table="dim_customers",
+    primary_key="customer_id",
+    dimensions={"country": Dimension("country")},
+    measures={"count": Measure("customer_id", "count")}
+)
+
+flow = SemanticFlow(
+    name="sales",
+    base_table=orders,
+    base_table_alias="o",
+    joins=[FlowJoin(customers, "c", "o", [JoinKey("customer_id", "customer_id")])]
+)
+
+handle = build_flow_handles({"sales": flow})
+```
+
+### REST API
+
+```python
+from semaflow import FlowHandle
+from semaflow.api import create_app
+
+handle = FlowHandle.from_dir("flows/", [ds])
+app = create_app(handle)
+
+# Endpoints:
+# GET  /flows              - List available flows
+# GET  /flows/{name}       - Get flow schema
+# POST /flows/{name}/query - Execute query
+```
+
+---
+
+## YAML Schema
+
+### Semantic Table (`tables/orders.yaml`)
+
+```yaml
+name: orders
+data_source: warehouse
+table: fct_orders
+primary_key: order_id
+time_dimension: order_date
+
+dimensions:
+  order_status:
+    expr: status
+    description: Order status
+
+measures:
+  # Simple measure
+  order_total:
+    expr: total_amount
+    agg: sum
+    description: Total order amount
+
+  order_count:
+    expr: order_id
+    agg: count
+
+  # Complex measure with formula
+  avg_order_amount:
+    formula: "order_total / order_count"
+    description: Average order amount
+```
+
+### Semantic Flow (`flows/sales.yaml`)
+
+```yaml
+name: sales
+base_table:
+  semantic_table: orders
+  alias: o
+joins:
+  customers:
+    semantic_table: customers
+    alias: c
+    to_table: o
+    join_type: left
+    join_keys:
+      - left: customer_id
+        right: customer_id
+```
+
+---
+
+## Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [Core Concepts](docs/concepts.md) | Data sources, tables, flows, queries |
+| [Expressions](docs/expressions.md) | Filter syntax, simple & complex measures |
+| [Python API](semaflowrs/docs/python-bindings.md) | Full Python API reference |
+| [Dialects](docs/dialects.md) | DuckDB, PostgreSQL, BigQuery specifics |
+| [Configuration](docs/configuration.md) | TOML configuration reference |
+| [Join Semantics](semaflowrs/docs/join-semantics.md) | Join types, cardinality, NULL behavior |
+| [Architecture](semaflowrs/docs/architecture.md) | System design and components |
+| [Contributing](CONTRIBUTING.md) | Development setup, PR guidelines |
+
+---
+
+## Examples
+
+See the [`examples/`](examples/) directory for complete working examples.
+
+```bash
+# DuckDB demo
+cd examples/duckdb && uv run python demo.py
+
+# PostgreSQL demo (requires Docker)
+cd examples/postgres && docker compose up -d && uv run python demo.py
+
+# FastAPI server
+uv run python examples/semantic_api.py
+# Then: curl http://localhost:8080/flows/sales
+```
+
+---
 
 ## Development
 
-- Tests: run `cargo test` from `semaflowrs/`.
-  - Unit-style cases: `semaflowrs/tests/unit/`.
-  - Integration/system cases: `semaflowrs/tests/integration/`.
-  - Entry shims `tests/unit.rs` and `tests/integration.rs` keep Cargo’s discovery happy.
-  - Filtering: `cargo test --lib` (unit-ish), `cargo test --tests` (all integration), or `cargo test --test duckdb_poc` for a specific integration file.
-- Python: `uv run maturin develop -m semaflowrs/Cargo.toml -F python` to build editable bindings (ensure venv active).
+```bash
+# Build Python bindings
+uv run maturin develop
 
-## Running examples
+# Run Rust tests
+cargo test --features all-backends
 
-- Print SQL from a request: `cargo run --example print_sql -- examples/models examples/requests/sales_country.json`.
-- Full DuckDB round-trip: `cargo run --example run_query`.
-- Python demo (after `maturin develop`): `uv run python examples/python_demo.py`.
+# Run Python tests
+uv run pytest tests/
+
+# Fast Rust iteration (no backends)
+cargo check --no-default-features
+```
+
+---
+
+## Roadmap
+
+- [ ] Snowflake backend
+- [ ] Trino backend
+- [ ] Result caching layer
+- [ ] Time-series helpers (period-over-period, rolling windows)
+- [ ] TypeScript bindings
+- [ ] WASM support
+
+---
+
+## Who is SemaFlow For?
+
+- **Backend / platform engineers** building data APIs
+- **SaaS teams** exposing metrics to customers
+- **AI engineers** building agent tools and MCP servers
+- **Data platform teams** building custom analytics UIs
+
+---
+
+## What SemaFlow Is *Not*
+
+- ❌ Not a BI tool or dashboard platform
+- ❌ Not a dbt replacement
+- ❌ Not a metrics governance UI
+- ❌ Not a heavy analytics gateway
+
+---
+
+## License
+
+MIT

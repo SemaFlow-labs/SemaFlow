@@ -1,0 +1,24 @@
+# Shared customer dimension table
+# Configure data_source in semaflow.toml or override via DataSource name
+name: customers
+data_source: warehouse
+table: dim_customers
+primary_key: customer_id
+dimensions:
+  customer_id:
+    expr: customer_id
+    description: Customer primary key
+  country:
+    expr: country
+    description: Customer country
+  email:
+    expr: email
+    description: Customer email
+  signup_date:
+    expr: signup_date
+    description: Customer signup date
+measures:
+  customer_count:
+    expr: customer_id
+    agg: count
+    description: Count of customers

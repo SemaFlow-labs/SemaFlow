@@ -1,63 +1,98 @@
-"""
-Python wrapper for the SemaFlow core (DuckDB-only for now).
+"""Public Python wrapper for the SemaFlow Rust core.
 
-Public helpers:
-- build_sql(tables, models, data_sources, request) -> str
-- run_query(tables, models, data_sources, request) -> list[dict]
-- load_models_from_dir(path) -> (tables, models)
+Two layers:
+- Definition types: `SemanticTable`, `SemanticFlow`, `FlowJoin`, etc. (PyO3-backed Rust structs)
+- Execution: `FlowHandle` (validated registry + connections) and the `build_flow_handles` helper.
 """
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple
+from .core import DataSource, Dimension, FlowJoin, JoinKey, Measure, SemanticFlow, SemanticTable, TableHandle
+from .handle import FlowHandle, build_flow_handles
 
-import yaml
+__all__ = [
+    "FlowHandle",
+    "build_flow_handles",
+    "DataSource",
+    "Dimension",
+    "TableHandle",
+    "Measure",
+    "SemanticTable",
+    "SemanticFlow",
+    "FlowJoin",
+    "JoinKey",
+]
 
-if TYPE_CHECKING:
+# Docstrings for Python help/autocomplete.
+DataSource.__doc__ = """Connection configuration passed to tables/flows.
 
-    def _build_sql(
-        tables: "Tables", models: "Models", data_sources: "DataSources", request: "Request"
-    ) -> str: ...
-    def _run(
-        tables: "Tables", models: "Models", data_sources: "DataSources", request: "Request"
-    ) -> List[Dict[str, Any]]: ...
-else:
-    from semaflow_core import build_sql as _build_sql
-    from semaflow_core import run as _run
+Args:
+    name: Logical name referenced by semantic tables.
+    uri: Backend-specific connection string (e.g., DuckDB file path).
+    max_concurrency: Optional limit to throttle queries per backend."""
 
-Tables = List[Dict[str, Any]]
-Models = List[Dict[str, Any]]
-DataSources = Dict[str, str]
-Request = Dict[str, Any]
+TableHandle.__doc__ = """Reference to a physical table within a data source.
 
+Typically created via DataSource.table and passed into SemanticTable.from_table."""
 
-def load_models_from_dir(root: Path) -> Tuple[Tables, Models]:
-    """Load semantic tables and models from a directory (tables/ and models/)."""
-    tables_dir = root / "tables"
-    models_dir = root / "models"
-    tables: Tables = []
-    models: Models = []
-    for path in sorted(tables_dir.glob("*.yml")) + sorted(tables_dir.glob("*.yaml")):
-        tables.append(_load_yaml(path))
-    for path in sorted(models_dir.glob("*.yml")) + sorted(models_dir.glob("*.yaml")):
-        models.append(_load_yaml(path))
-    return tables, models
+JoinKey.__doc__ = """Join key mapping inside a FlowJoin.
 
+Args:
+    left: Column name on the joined table.
+    right: Column name on the parent table alias."""
 
-def build_sql(tables: Tables, models: Models, data_sources: DataSources, request: Request) -> str:
-    """Compile a QueryRequest into SQL using the Rust core."""
-    return _build_sql(tables, models, data_sources, request)
+Dimension.__doc__ = """Dimension expression/metadata on a SemanticTable.
 
+Args:
+    expression: Column name or expression.
+    data_type: Optional logical type.
+    description: Optional human-friendly description."""
 
-def run_query(
-    tables: Tables, models: Models, data_sources: DataSources, request: Request
-) -> List[Dict[str, Any]]:
-    """Validate, compile, and execute a query against DuckDB. Returns rows as list of dicts."""
-    return _run(tables, models, data_sources, request)
+Measure.__doc__ = """Aggregated measure on a SemanticTable.
 
+Args:
+    expression: Column or expression to aggregate.
+    agg: Aggregation name (sum, count, count_distinct, min, max, avg).
+    data_type: Optional logical type.
+    description: Optional human-friendly description."""
 
-def _load_yaml(path: Path) -> Dict[str, Any]:
-    with path.open("r") as f:
-        return yaml.safe_load(f)
+FlowJoin.__doc__ = """Declarative join between semantic tables inside a flow.
 
+Args:
+    semantic_table: Joined SemanticTable.
+    alias: Alias to use for the joined table.
+    to_table: Alias of the table to join against.
+    join_type: One of inner, left, right, full.
+    join_keys: List of JoinKey pairs.
+    description: Optional human-readable description."""
 
-__all__ = ["build_sql", "run_query", "load_models_from_dir"]
+SemanticTable.__doc__ = """Logical table describing dimensions/measures.
+
+Args mirror the YAML schema:
+    name: Logical table name.
+    data_source: DataSource instance or name this table lives in.
+    table: Physical table name (or view).
+    primary_key: Column used as the primary key.
+    time_dimension: Optional timestamp column for time-aware measures.
+    dimensions: Mapping of name -> Dimension.
+    measures: Mapping of name -> Measure.
+    description: Optional human-readable description."""
+
+SemanticFlow.__doc__ = """Flow definition stitching semantic tables together.
+
+Args:
+    name: Flow name referenced by requests.
+    base_table: Base SemanticTable.
+    base_table_alias: Alias for the base table.
+    joins: Optional list of FlowJoin objects.
+    description: Optional human-readable description."""
+
+FlowHandle.__doc__ = """Validated, long-lived handle wrapping flows/tables/connections.
+
+Use build_flow_handles to build one from class-based definitions. Exposes async build_sql/execute for query paths."""
+
+build_flow_handles.__doc__ = """Build a single FlowHandle from class-based flow definitions.
+
+Args:
+    flows: Mapping of flow name -> SemanticFlow.
+
+Returns:
+    FlowHandle containing all provided flows, validated once with shared tables/connections."""

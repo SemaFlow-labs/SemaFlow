@@ -1,0 +1,44 @@
+# Shared orders fact table
+# Configure data_source in semaflow.toml or override via DataSource name
+name: orders
+data_source: warehouse
+table: fct_orders
+primary_key: order_id
+time_dimension: order_date
+dimensions:
+  order_id:
+    expr: order_id
+    description: Order primary key
+  customer_id:
+    expr: customer_id
+    description: Foreign key to customers
+  order_date:
+    expr: order_date
+    description: Order timestamp
+  product_id:
+    expr: product_id
+    description: Foreign key to products
+  order_status:
+    expr: status
+    description: Order status
+
+measures:
+  n_order_items:
+    expr: quantity
+    agg: sum
+    description: Total number of items in orders
+  order_total:
+    expr: total_amount
+    agg: sum
+    description: Total order amount
+  order_count:
+    expr: order_id
+    agg: count
+    description: Count of orders
+  avg_order_amount:
+    formula: "safe_divide(sum(total_amount), count(order_id))"
+    description: Average order amount
+  avg_unit_price:
+    expr: unit_price
+    agg: avg
+    description: Average unit price of items in orders

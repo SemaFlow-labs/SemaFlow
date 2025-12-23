@@ -1,0 +1,53 @@
+# semaflow.toml - Configuration for SemaFlow semantic layer engine
+#
+# Config search order:
+# 1. SEMAFLOW_CONFIG environment variable (explicit path)
+# 2. ./semaflow.toml (current directory)
+# 3. ~/.config/semaflow/config.toml (user config)
+
+# =============================================================================
+# Global Defaults
+# =============================================================================
+# These apply to all datasources unless overridden
+
+[defaults.query]
+timeout_ms = 30000          # Query timeout (30 seconds)
+max_row_limit = 10000       # Maximum rows returned (0 = unlimited)
+default_row_limit = 100     # Default LIMIT if not specified
+
+[defaults.pool]
+size = 16                   # Default connection pool size
+idle_timeout_secs = 300     # Close idle connections after 5 minutes
+
+[defaults.schema_cache]
+ttl_secs = 3600             # Cache schemas for 1 hour
+max_size = 1000             # Maximum cached table schemas
+
+[defaults.validation]
+warn_only = false           # Set true to warn on validation errors instead of failing
+
+# =============================================================================
+# Per-Datasource Overrides
+# =============================================================================
+# Override settings for specific datasources by name
+
+# BigQuery datasource named "analytics"
+[datasources.analytics.bigquery]
+use_query_cache = true              # Use BigQuery's query cache
+maximum_bytes_billed = 10737418240  # 10 GB limit per query
+query_timeout_ms = 60000            # 60 second timeout for BQ queries
+
+# BigQuery datasource for expensive queries
+[datasources.warehouse.bigquery]
+use_query_cache = false             # Disable cache for fresh data
+maximum_bytes_billed = 107374182400 # 100 GB limit
+query_timeout_ms = 300000           # 5 minute timeout
+
+# DuckDB datasource with higher concurrency
+[datasources.local_duckdb.duckdb]
+max_concurrency = 32                # Allow 32 concurrent queries
+
+# PostgreSQL datasource
+[datasources.postgres_prod.postgres]
+pool_size = 64                      # Larger pool for production
+statement_timeout_ms = 15000        # 15 second statement timeout

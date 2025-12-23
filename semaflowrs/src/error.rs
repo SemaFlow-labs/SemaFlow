@@ -18,6 +18,9 @@ pub enum SemaflowError {
     Sql(String),
     #[error("execution error: {0}")]
     Execution(String),
+    #[error("config error: {0}")]
+    Config(String),
+    #[cfg(feature = "duckdb")]
     #[error("duckdb error: {0}")]
     DuckDb(#[from] duckdb::Error),
     #[error(transparent)]

@@ -11,3 +11,12 @@ target/
 *.pdb
 
 # Misc
+*__pycache__
+*.so
+target
+.venv
+AGENTS.md
+.uv_cache
+.claude
+.env
+*.duckdb

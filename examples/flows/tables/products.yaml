@@ -1,0 +1,21 @@
+# Shared products dimension table
+# Configure data_source in semaflow.toml or override via DataSource name
+name: products
+data_source: warehouse
+table: dim_products
+primary_key: product_id
+dimensions:
+  product_id:
+    expr: product_id
+    description: Product primary key
+  name:
+    expr: product_name
+    description: The human-readable name of the product
+  category:
+    expr: category
+    description: The category of the product
+measures:
+  price:
+    expr: price
+    agg: sum
+    description: The price of the product unit

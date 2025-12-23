@@ -2,25 +2,51 @@
 name = "semaflow-core"
 version = "0.1.0"
 edition = "2021"
+description = "Semantic layer for analytical databases"
+license = "MIT"
+repository = "https://github.com/JCart97/semaflow"
+homepage = "https://github.com/JCart97/semaflow"
 
 [lib]
-name = "semaflow_core"
+name = "semaflow"
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
+futures = "0.3"
 async-trait = "0.1"
-duckdb = { version = "1.4.2", features = ["bundled"] }
 glob = "0.3"
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+toml = "0.8"
+dirs = "5.0"
 thiserror = "1.0"
 tokio = { workspace = true }
 tempfile = "3.10"
 pyo3 = { version = "0.21", optional = true }
+once_cell = "1.19"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# PostgreSQL support (optional)
+tokio-postgres = { version = "0.7", optional = true }
+deadpool-postgres = { version = "0.14", optional = true }
+
+# BigQuery support (optional)
+# gcp-bigquery-client = { version = "0.25", optional = true }
+gcp-bigquery-client = { git = "https://github.com/JCart97/gcp-bigquery-client", tag = "v0.25.1-adc-fix", optional = true }
+
+# DuckDB support (optional, but included in default)
+duckdb = { version = "1.4.2", features = ["bundled"], optional = true }
 
 [features]
+default = ["duckdb"]  # DuckDB on by default for backwards compat
+duckdb = ["dep:duckdb"]
 python = ["pyo3/extension-module", "pyo3/macros"]
+postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
+bigquery = ["dep:gcp-bigquery-client"]
+all-backends = ["duckdb", "postgres", "bigquery"]

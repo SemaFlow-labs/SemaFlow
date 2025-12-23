@@ -1,24 +1,28 @@
 use std::fs;
 use std::path::Path;
 
-use semaflow_core::{
-    data_sources::{DataSource, DataSourceRegistry},
+use semaflow::{
+    backends::{BackendConnection, ConnectionManager, DuckDbConnection},
     query_builder::SqlBuilder,
-    registry::ModelRegistry,
-    runtime::run_query,
+    registry::FlowRegistry,
+    runtime::{run_query, run_query_paginated},
     validation::Validator,
-    DuckDbExecutor, QueryExecutor, QueryRequest, QueryResult, SchemaProvider, TableSchema,
+    QueryRequest, QueryResult, TableSchema,
 };
 use tokio;
 
 #[derive(Clone)]
-struct FakeExecutor;
+struct FakeConnection;
 
 #[async_trait::async_trait]
-impl SchemaProvider for FakeExecutor {
-    async fn fetch_schema(&self, _table: &str) -> semaflow_core::error::Result<TableSchema> {
+impl BackendConnection for FakeConnection {
+    fn dialect(&self) -> &(dyn semaflow::dialect::Dialect + Send + Sync) {
+        &semaflow::dialect::DuckDbDialect
+    }
+
+    async fn fetch_schema(&self, _table: &str) -> semaflow::error::Result<TableSchema> {
         Ok(TableSchema {
-            columns: vec![semaflow_core::schema_cache::ColumnSchema {
+            columns: vec![semaflow::schema_cache::ColumnSchema {
                 name: "id".to_string(),
                 data_type: "INTEGER".to_string(),
                 nullable: false,
@@ -27,14 +31,26 @@ impl SchemaProvider for FakeExecutor {
             foreign_keys: vec![],
         })
     }
-}
-
-#[async_trait::async_trait]
-impl QueryExecutor for FakeExecutor {
-    async fn query(&self, _sql: &str) -> semaflow_core::error::Result<QueryResult> {
+    async fn execute_sql(&self, _sql: &str) -> semaflow::error::Result<QueryResult> {
         Ok(QueryResult {
             columns: vec![],
             rows: vec![],
+        })
+    }
+
+    async fn execute_sql_paginated(
+        &self,
+        _sql: &str,
+        _page_size: u32,
+        _cursor: Option<&semaflow::pagination::Cursor>,
+        _query_hash: u64,
+    ) -> semaflow::error::Result<semaflow::executor::PaginatedResult> {
+        Ok(semaflow::executor::PaginatedResult {
+            columns: vec![],
+            rows: vec![],
+            cursor: None,
+            has_more: false,
+            total_rows: None,
         })
     }
 }
@@ -67,11 +83,11 @@ fn bootstrap_duckdb(db_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_models(root: &Path) -> anyhow::Result<()> {
+fn write_flows(root: &Path) -> anyhow::Result<()> {
     let tables_dir = root.join("tables");
-    let models_dir = root.join("models");
+    let flows_dir = root.join("flows");
     fs::create_dir_all(&tables_dir)?;
-    fs::create_dir_all(&models_dir)?;
+    fs::create_dir_all(&flows_dir)?;
 
     let customers = r#"
 name: customers
@@ -80,11 +96,11 @@ table: customers
 primary_key: id
 dimensions:
   id:
-    expression:
+    expr:
       type: column
       column: id
   country:
-    expression:
+    expr:
       type: column
       column: country
 measures:
@@ -104,11 +120,11 @@ primary_key: id
 time_dimension: created_at
 dimensions:
   id:
-    expression:
+    expr:
       type: column
       column: id
   customer_id:
-    expression:
+    expr:
       type: column
       column: customer_id
 measures:
@@ -125,7 +141,7 @@ measures:
 "#;
     fs::write(tables_dir.join("orders.yaml"), orders)?;
 
-    let sales_model = r#"
+    let sales_flow = r#"
 name: sales
 base_table:
   semantic_table: orders
@@ -140,7 +156,7 @@ joins:
       - left: customer_id
         right: id
 "#;
-    fs::write(models_dir.join("sales.yaml"), sales_model)?;
+    fs::write(flows_dir.join("sales.yaml"), sales_flow)?;
     Ok(())
 }
 
@@ -149,28 +165,36 @@ async fn duckdb_query_round_trip() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("demo.duckdb");
     bootstrap_duckdb(&db_path)?;
-    write_models(dir.path())?;
+    write_flows(dir.path())?;
 
-    let executor = DuckDbExecutor::new(&db_path);
-    let mut ds_registry = DataSourceRegistry::new();
-    ds_registry.insert("duckdb_local", DataSource::duckdb(executor.clone()));
-    let validator = Validator::new(ds_registry.clone(), false);
+    let mut connections = ConnectionManager::new();
+    connections.insert(
+        "duckdb_local",
+        std::sync::Arc::new(DuckDbConnection::new(&db_path).with_max_concurrency(8)),
+    );
+    let validator = Validator::new(connections.clone(), false);
 
-    let mut registry = ModelRegistry::load_from_dir(dir.path())?;
+    let mut registry = FlowRegistry::load_from_dir(dir.path())?;
     validator.validate_registry(&mut registry).await?;
 
     let builder = SqlBuilder::default();
     let request = QueryRequest {
-        model: "sales".to_string(),
+        flow: "sales".to_string(),
         dimensions: vec!["country".to_string()],
         measures: vec!["order_total".to_string(), "distinct_customers".to_string()],
         filters: vec![],
         order: vec![],
         limit: Some(10),
         offset: None,
+        page_size: None,
+        cursor: None,
     };
-    let sql = builder.build_for_request(&registry, &ds_registry, &request)?;
-    let result = executor.query(&sql).await?;
+    let sql = builder.build_for_request(&registry, &connections, &request)?;
+    let result = connections
+        .get("duckdb_local")
+        .unwrap()
+        .execute_sql(&sql)
+        .await?;
     assert_eq!(result.rows.len(), 2);
     let mut by_country = std::collections::HashMap::new();
     for row in result.rows {
@@ -188,28 +212,125 @@ async fn duckdb_runtime_run_query() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("demo.duckdb");
     bootstrap_duckdb(&db_path)?;
-    write_models(dir.path())?;
+    write_flows(dir.path())?;
 
-    let executor = DuckDbExecutor::new(&db_path);
-    let mut ds_registry = DataSourceRegistry::new();
-    ds_registry.insert("duckdb_local", DataSource::duckdb(executor.clone()));
-    let validator = Validator::new(ds_registry.clone(), false);
+    let mut connections = ConnectionManager::new();
+    connections.insert(
+        "duckdb_local",
+        std::sync::Arc::new(DuckDbConnection::new(&db_path).with_max_concurrency(8)),
+    );
+    let validator = Validator::new(connections.clone(), false);
 
-    let mut registry = ModelRegistry::load_from_dir(dir.path())?;
+    let mut registry = FlowRegistry::load_from_dir(dir.path())?;
     validator.validate_registry(&mut registry).await?;
 
     let request = QueryRequest {
-        model: "sales".to_string(),
+        flow: "sales".to_string(),
         dimensions: vec!["country".to_string()],
         measures: vec!["order_total".to_string()],
         filters: vec![],
         order: vec![],
         limit: Some(10),
         offset: None,
+        page_size: None,
+        cursor: None,
     };
 
-    let result = run_query(&registry, &ds_registry, &request).await?;
+    let result = run_query(&registry, &connections, &request).await?;
     assert_eq!(result.rows.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn duckdb_paginated_query() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("demo.duckdb");
+    bootstrap_duckdb(&db_path)?;
+    write_flows(dir.path())?;
+
+    let mut connections = ConnectionManager::new();
+    connections.insert(
+        "duckdb_local",
+        std::sync::Arc::new(DuckDbConnection::new(&db_path).with_max_concurrency(8)),
+    );
+    let validator = Validator::new(connections.clone(), false);
+
+    let mut registry = FlowRegistry::load_from_dir(dir.path())?;
+    validator.validate_registry(&mut registry).await?;
+
+    // First page - page_size=1 to ensure multiple pages
+    let request = QueryRequest {
+        flow: "sales".to_string(),
+        dimensions: vec!["country".to_string()],
+        measures: vec!["order_total".to_string()],
+        filters: vec![],
+        order: vec![],
+        limit: None,
+        offset: None,
+        page_size: Some(1),
+        cursor: None,
+    };
+
+    let result = run_query_paginated(&registry, &connections, &request).await?;
+    assert_eq!(result.rows.len(), 1, "First page should have 1 row");
+    assert!(result.has_more, "Should have more pages");
+    assert!(result.cursor.is_some(), "Should have cursor for next page");
+
+    // Second page using cursor
+    let request2 = QueryRequest {
+        flow: "sales".to_string(),
+        dimensions: vec!["country".to_string()],
+        measures: vec!["order_total".to_string()],
+        filters: vec![],
+        order: vec![],
+        limit: None,
+        offset: None,
+        page_size: Some(1),
+        cursor: result.cursor,
+    };
+
+    let result2 = run_query_paginated(&registry, &connections, &request2).await?;
+    assert_eq!(result2.rows.len(), 1, "Second page should have 1 row");
+    // With 2 countries total, second page is the last
+    assert!(!result2.has_more, "Should be last page");
+    assert!(result2.cursor.is_none(), "Last page should have no cursor");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn duckdb_paginated_invalid_cursor_rejected() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("demo.duckdb");
+    bootstrap_duckdb(&db_path)?;
+    write_flows(dir.path())?;
+
+    let mut connections = ConnectionManager::new();
+    connections.insert(
+        "duckdb_local",
+        std::sync::Arc::new(DuckDbConnection::new(&db_path).with_max_concurrency(8)),
+    );
+    let validator = Validator::new(connections.clone(), false);
+
+    let mut registry = FlowRegistry::load_from_dir(dir.path())?;
+    validator.validate_registry(&mut registry).await?;
+
+    // Invalid cursor should be rejected
+    let request = QueryRequest {
+        flow: "sales".to_string(),
+        dimensions: vec!["country".to_string()],
+        measures: vec!["order_total".to_string()],
+        filters: vec![],
+        order: vec![],
+        limit: None,
+        offset: None,
+        page_size: Some(10),
+        cursor: Some("invalid_cursor".to_string()),
+    };
+
+    let result = run_query_paginated(&registry, &connections, &request).await;
+    assert!(result.is_err(), "Invalid cursor should error");
+
     Ok(())
 }
 
@@ -217,9 +338,9 @@ async fn duckdb_runtime_run_query() -> anyhow::Result<()> {
 async fn mixed_data_sources_fail_validation() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let tables_dir = dir.path().join("tables");
-    let models_dir = dir.path().join("models");
+    let flows_dir = dir.path().join("flows");
     fs::create_dir_all(&tables_dir)?;
-    fs::create_dir_all(&models_dir)?;
+    fs::create_dir_all(&flows_dir)?;
 
     let t1 = r#"
 name: t1
@@ -241,7 +362,7 @@ dimensions:
 "#;
     fs::write(tables_dir.join("t2.yaml"), t2)?;
 
-    let model = r#"
+    let flow_yaml = r#"
 name: cross
 base_table:
   semantic_table: t1
@@ -256,21 +377,21 @@ joins:
       - left: id
         right: id
 "#;
-    fs::write(models_dir.join("cross.yaml"), model)?;
+    fs::write(flows_dir.join("cross.yaml"), flow_yaml)?;
 
-    let mut registry = ModelRegistry::load_from_dir(dir.path())?;
-    let mut ds_registry = DataSourceRegistry::new();
-    let dummy = FakeExecutor;
-    ds_registry.insert("ds1", DataSource::duckdb(dummy.clone()));
-    ds_registry.insert("ds2", DataSource::duckdb(dummy));
+    let mut registry = FlowRegistry::load_from_dir(dir.path())?;
+    let mut connections = ConnectionManager::new();
+    let dummy = FakeConnection;
+    connections.insert("ds1", std::sync::Arc::new(dummy.clone()));
+    connections.insert("ds2", std::sync::Arc::new(dummy));
 
-    let validator = Validator::new(ds_registry, false);
+    let validator = Validator::new(connections, false);
     let err = validator
         .validate_registry(&mut registry)
         .await
         .unwrap_err();
     match err {
-        semaflow_core::SemaflowError::Validation(msg) => {
+        semaflow::SemaflowError::Validation(msg) => {
             eprintln!("validation message: {msg}");
             assert!(msg.contains("mixes data sources"));
         }
