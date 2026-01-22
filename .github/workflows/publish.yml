@@ -6,26 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Linux builds (uses Docker containers with Python pre-installed)
-  build-linux:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64]  # aarch64 disabled due to ring crate cross-compile issues
-    steps:
-      - uses: actions/checkout@v4
-      - uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --features python,all-backends --out dist -i python3.12
-          manylinux: auto
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-linux-${{ matrix.target }}
-          path: dist/*.whl
-
   # macOS builds (native runners)
+  # Linux disabled due to ring crate cross-compile issues with manylinux
   build-macos:
     runs-on: macos-latest
     strategy:
@@ -64,7 +46,7 @@ jobs:
           path: dist/*.whl
 
   publish:
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
