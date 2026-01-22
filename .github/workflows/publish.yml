@@ -6,27 +6,32 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
+  # Linux builds (uses Docker containers with Python pre-installed)
+  build-linux:
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Linux x86_64
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          # Linux aarch64 (cross-compile)
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          # macOS x86_64 (cross-compile from ARM runner)
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          # macOS ARM64 (native)
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          # Windows x86_64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --features python,all-backends --out dist -i python3.12
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*.whl
+
+  # macOS builds (native runners)
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,14 +41,30 @@ jobs:
         with:
           target: ${{ matrix.target }}
           args: --release --features python,all-backends --out dist
-          manylinux: auto
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.target }}
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*.whl
+
+  # Windows build
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          args: --release --features python,all-backends --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
           path: dist/*.whl
 
   publish:
-    needs: build
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
