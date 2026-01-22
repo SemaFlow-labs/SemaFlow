@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - semaflowrs/**
+      - semaflow/**
+      - tests/**
   pull_request:
     branches: [main]
+    paths:
+      - semaflowrs/**
+      - semaflow/**
+      - tests/**
 
 env:
   CARGO_TERM_COLOR: always
