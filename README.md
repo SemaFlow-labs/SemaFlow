@@ -95,6 +95,7 @@ BI / Analytics               │
 
 - **Multi-backend support**: DuckDB, PostgreSQL, BigQuery
 - **Semantic modeling**: Define dimensions, measures, and flows in YAML or Python
+- **DataFrame registration**: Query pandas/polars DataFrames via in-memory DuckDB (zero-copy Arrow)
 - **Automatic optimization**: Join pruning, pre-aggregation CTEs, fanout detection
 - **Type-safe SQL generation**: AST-based SQL building with dialect-aware rendering
 - **Async execution**: Non-blocking queries with connection pooling
@@ -177,6 +178,32 @@ flow = SemanticFlow(
 )
 
 handle = build_flow_handles({"sales": flow})
+```
+
+### From In-Memory DataFrames
+
+Query pandas or polars DataFrames through SemaFlow's semantic layer:
+
+```python
+import pyarrow as pa
+import pandas as pd
+from semaflow import DataSource, SemanticTable, SemanticFlow, FlowHandle, Dimension, Measure
+
+# Create in-memory DuckDB
+ds = DataSource.duckdb(":memory:", name="test")
+
+# Register a DataFrame (zero-copy via Arrow)
+df = pd.DataFrame({"id": [1, 2, 3], "amount": [100.0, 200.0, 150.0], "status": ["a", "b", "a"]})
+ds.register_dataframe("orders", pa.Table.from_pandas(df).to_reader())
+
+# Define semantic layer and query
+orders = SemanticTable(name="orders", data_source=ds, table="orders", primary_key="id",
+                       dimensions={"status": Dimension("status")},
+                       measures={"total": Measure("amount", "sum")})
+flow = SemanticFlow(name="test", base_table=orders, base_table_alias="o")
+handle = FlowHandle.from_parts([orders], [flow], [ds])
+
+result = await handle.execute({"flow": "test", "dimensions": ["o.status"], "measures": ["o.total"]})
 ```
 
 ### REST API

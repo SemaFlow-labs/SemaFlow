@@ -27,7 +27,21 @@ DataSource.__doc__ = """Connection configuration passed to tables/flows.
 Args:
     name: Logical name referenced by semantic tables.
     uri: Backend-specific connection string (e.g., DuckDB file path).
-    max_concurrency: Optional limit to throttle queries per backend."""
+    max_concurrency: Optional limit to throttle queries per backend.
+
+Methods:
+    duckdb(path, name=None, max_concurrency=None): Create a DuckDB data source.
+    postgres(connection_string, schema, name=None, max_concurrency=None): Create a PostgreSQL data source.
+    bigquery(project_id, dataset, service_account_path=None, name=None): Create a BigQuery data source.
+    register_dataframe(table_name, data): Register an Arrow RecordBatchReader as a table (DuckDB only).
+    table(name): Create a TableHandle reference to a table in this data source.
+
+Example (in-memory with DataFrame):
+    >>> import pyarrow as pa
+    >>> ds = DataSource.duckdb(":memory:", name="test")
+    >>> df = pd.DataFrame({"id": [1, 2], "amount": [100.0, 200.0]})
+    >>> ds.register_dataframe("orders", pa.Table.from_pandas(df).to_reader())
+"""
 
 TableHandle.__doc__ = """Reference to a physical table within a data source.
 

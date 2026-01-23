@@ -27,7 +27,7 @@ dirs = "5.0"
 thiserror = "1.0"
 tokio = { workspace = true }
 tempfile = "3.10"
-pyo3 = { version = "0.21", optional = true }
+pyo3 = { version = "0.25", optional = true }
 once_cell = "1.19"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
@@ -41,11 +41,14 @@ deadpool-postgres = { version = "0.14", optional = true }
 gcp-bigquery-client = { git = "https://github.com/JCart97/gcp-bigquery-client", tag = "v0.25.1-adc-fix", optional = true }
 
 # DuckDB support (optional, but included in default)
-duckdb = { version = "1.4.2", features = ["bundled"], optional = true }
+duckdb = { version = "1.4.2", features = ["bundled", "appender-arrow"], optional = true }
+
+# Arrow support for DataFrame registration (using arrow-pyarrow for pyo3 integration)
+arrow = { version = "56", features = ["pyarrow", "ffi"], optional = true }
 
 [features]
 default = ["duckdb"]  # DuckDB on by default for backwards compat
-duckdb = ["dep:duckdb"]
+duckdb = ["dep:duckdb", "dep:arrow"]
 python = ["pyo3/extension-module", "pyo3/macros"]
 postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
 bigquery = ["dep:gcp-bigquery-client"]
