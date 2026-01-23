@@ -6,7 +6,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
 authors = [
-    { name = "Jack Hart" }
+    { name = "JCart97" }
 ]
 keywords = ["semantic-layer", "analytics", "sql", "duckdb", "bigquery", "postgres"]
 classifiers = [
