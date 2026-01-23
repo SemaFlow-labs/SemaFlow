@@ -22,8 +22,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/JCart97/semaflow"
-Repository = "https://github.com/JCart97/semaflow"
+Homepage = "https://github.com/SemaFlow-labs/SemaFlow"
+Repository = "https://github.com/SemaFlow-labs/SemaFlow"
 
 [project.optional-dependencies]
 # Python package extras (install-time dependencies)
