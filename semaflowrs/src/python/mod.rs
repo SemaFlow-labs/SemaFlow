@@ -141,6 +141,13 @@ impl PyDataSource {
     }
 
     /// Create a DuckDB data source.
+    ///
+    /// Args:
+    ///     path: Path to DuckDB database file. Note: `:memory:` is NOT supported
+    ///           for pre-populated databases because Python and Rust use separate
+    ///           DuckDB library instances. Use a file path instead.
+    ///     name: Optional data source name (defaults to "duckdb")
+    ///     max_concurrency: Optional max concurrent queries
     #[staticmethod]
     #[pyo3(signature = (path, name=None, max_concurrency=None))]
     fn duckdb(path: String, name: Option<String>, max_concurrency: Option<usize>) -> Self {

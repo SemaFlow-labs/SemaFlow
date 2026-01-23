@@ -22,17 +22,46 @@ All backends share consistent behavior for:
 
 ## DuckDB
 
-**Connection**:
+### File-Based Databases (Recommended)
+
 ```python
 ds = DataSource.duckdb("path/to/database.duckdb", name="my_db")
-# Or in-memory:
-ds = DataSource.duckdb(":memory:", name="mem_db")
 ```
 
 **Features**:
 - Embedded database (no server required)
 - Connection pooling with semaphore-based backpressure (default: 16 concurrent)
 - Full SQL:2003 aggregate filter support
+
+### In-Memory Databases
+
+⚠️ **Limitation**: `DataSource.duckdb(":memory:")` creates an **empty, isolated** database.
+
+This is because SemaFlow's Rust backend and Python's `duckdb` package link separate
+DuckDB libraries. They cannot share in-memory databases, even with named databases
+like `:memory:mydb`.
+
+**Workaround for testing**: Use a temporary file instead:
+
+```python
+import tempfile
+import os
+import duckdb
+
+# Create a temp file
+db_path = os.path.join(tempfile.gettempdir(), "test.duckdb")
+
+# Populate with Python duckdb
+conn = duckdb.connect(db_path)
+conn.execute("CREATE TABLE orders (id INT, amount DECIMAL)")
+conn.execute("INSERT INTO orders VALUES (1, 100.0)")
+conn.close()
+
+# Now use with semaflow
+ds = DataSource.duckdb(db_path, name="test")
+```
+
+> **Future**: We're exploring ways to support true in-memory databases.
 
 **Functions**:
 | Category | Functions |
