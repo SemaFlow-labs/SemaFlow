@@ -180,7 +180,7 @@ fn arrow_type_to_duckdb(dt: &DataType) -> &'static str {
         DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => "DECIMAL",
         DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => "VARCHAR", // fallback
         DataType::Struct(_) => "VARCHAR", // fallback
-        _ => "VARCHAR", // safe fallback for unknown types
+        _ => "VARCHAR",                   // safe fallback for unknown types
     }
 }
 

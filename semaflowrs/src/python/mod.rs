@@ -1,8 +1,6 @@
 //! Python bindings (PyO3) for SemaFlow core.
 
 #[cfg(feature = "duckdb")]
-use arrow::array::RecordBatchReader;
-#[cfg(feature = "duckdb")]
 use crate::backends::DuckDbConnection;
 use crate::{
     backends::ConnectionManager,
@@ -17,6 +15,8 @@ use crate::{
     validation::Validator,
     QueryRequest, SemaflowError,
 };
+#[cfg(feature = "duckdb")]
+use arrow::array::RecordBatchReader;
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
