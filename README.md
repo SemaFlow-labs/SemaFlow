@@ -110,8 +110,14 @@ BI / Analytics               │
 ```bash
 pip install semaflow
 
+# With Arrow support (for register_dataframe with pandas/polars)
+pip install "semaflow[arrow]"
+
 # With FastAPI support
 pip install "semaflow[api]"
+
+# All extras
+pip install "semaflow[all]"
 ```
 
 ---
