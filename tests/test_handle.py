@@ -30,11 +30,11 @@ class TestFlowHandleFromParts:
 class TestFlowHandleFromDir:
     """Tests for FlowHandle.from_dir() initialization."""
 
-    def test_loads_from_yaml_directory(self, flow_yaml_dir: Path, seeded_db: Path):
+    def test_loads_from_yaml_directory(self, flow_yaml_dir: Path, seeded_datasource: DataSource):
         """FlowHandle can be loaded from a directory of YAML files."""
         handle = FlowHandle.from_dir(
             str(flow_yaml_dir),
-            [DataSource.duckdb(str(seeded_db), name="test_db")],
+            [seeded_datasource],
         )
         assert handle is not None
         flows = handle.list_flows()

@@ -147,6 +147,32 @@ class DataSource:
         """
         ...
 
+    def register_dataframe(self, table_name: str, data: Any) -> None:
+        """Register an Arrow RecordBatchReader as a table in this data source.
+
+        This method enables in-memory DuckDB databases to be populated with data
+        from pandas, polars, or any Arrow-compatible library via zero-copy transfer.
+
+        Only supported for DuckDB data sources.
+
+        Args:
+            table_name: Name for the table in the database.
+            data: Arrow RecordBatchReader (e.g., `pa.Table.from_pandas(df).to_reader()`
+                  for pandas, or `df.to_arrow().to_reader()` for polars).
+
+        Raises:
+            ValueError: If this is not a DuckDB data source.
+            RuntimeError: If table registration fails.
+
+        Example:
+            >>> import pyarrow as pa
+            >>> import pandas as pd
+            >>> ds = DataSource.duckdb(":memory:", name="test")
+            >>> df = pd.DataFrame({"id": [1, 2], "amount": [100.0, 200.0]})
+            >>> ds.register_dataframe("orders", pa.Table.from_pandas(df).to_reader())
+        """
+        ...
+
 class TableHandle:
     """Reference to a specific table within a DataSource.
 

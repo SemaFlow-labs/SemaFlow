@@ -4,7 +4,8 @@ Shared pytest fixtures for SemaFlow tests.
 
 from pathlib import Path
 
-import duckdb
+import pandas as pd
+import pyarrow as pa
 import pytest
 
 from semaflow import (
@@ -20,42 +21,31 @@ from semaflow import (
 
 
 @pytest.fixture
-def tmp_db_path(tmp_path: Path) -> Path:
-    """Return a temporary path for a DuckDB database."""
-    return tmp_path / "test.duckdb"
+def seeded_datasource() -> DataSource:
+    """Create an in-memory DuckDB datasource with test data."""
+    ds = DataSource.duckdb(":memory:", name="test_db")
 
+    # Create customers DataFrame
+    customers_df = pd.DataFrame({
+        "id": [1, 2, 3, 4],
+        "name": ["Alice", "Bob", "Carla", "David"],
+        "country": ["US", "UK", "US", "DE"],
+    })
+    ds.register_dataframe("customers", pa.Table.from_pandas(customers_df).to_reader())
 
-@pytest.fixture
-def seeded_db(tmp_db_path: Path) -> Path:
-    """Create a DuckDB database with test data."""
-    conn = duckdb.connect(str(tmp_db_path))
-    conn.execute("""
-        CREATE TABLE customers (
-            id INTEGER PRIMARY KEY,
-            name VARCHAR,
-            country VARCHAR
-        );
-        CREATE TABLE orders (
-            id INTEGER PRIMARY KEY,
-            customer_id INTEGER,
-            amount DOUBLE,
-            status VARCHAR,
-            created_at TIMESTAMP
-        );
-        INSERT INTO customers VALUES
-            (1, 'Alice', 'US'),
-            (2, 'Bob', 'UK'),
-            (3, 'Carla', 'US'),
-            (4, 'David', 'DE');
-        INSERT INTO orders VALUES
-            (1, 1, 100.0, 'complete', '2024-01-01'),
-            (2, 1, 50.0, 'complete', '2024-01-02'),
-            (3, 2, 25.0, 'pending', '2024-01-03'),
-            (4, 3, 200.0, 'complete', '2024-01-04'),
-            (5, 3, 75.0, 'pending', '2024-01-05');
-    """)
-    conn.close()
-    return tmp_db_path
+    # Create orders DataFrame
+    orders_df = pd.DataFrame({
+        "id": [1, 2, 3, 4, 5],
+        "customer_id": [1, 1, 2, 3, 3],
+        "amount": [100.0, 50.0, 25.0, 200.0, 75.0],
+        "status": ["complete", "complete", "pending", "complete", "pending"],
+        "created_at": pd.to_datetime([
+            "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"
+        ]),
+    })
+    ds.register_dataframe("orders", pa.Table.from_pandas(orders_df).to_reader())
+
+    return ds
 
 
 @pytest.fixture
@@ -129,18 +119,18 @@ def joined_flow(orders_table: SemanticTable, customers_table: SemanticTable) -> 
 
 
 @pytest.fixture
-def simple_flow_handle(seeded_db: Path, orders_table: SemanticTable, simple_flow: SemanticFlow) -> FlowHandle:
+def simple_flow_handle(seeded_datasource: DataSource, orders_table: SemanticTable, simple_flow: SemanticFlow) -> FlowHandle:
     """Create a FlowHandle with a simple single-table flow."""
     return FlowHandle.from_parts(
         tables=[orders_table],
         flows=[simple_flow],
-        data_sources=[DataSource.duckdb(str(seeded_db), name="test_db")],
+        data_sources=[seeded_datasource],
     )
 
 
 @pytest.fixture
 def joined_flow_handle(
-    seeded_db: Path,
+    seeded_datasource: DataSource,
     orders_table: SemanticTable,
     customers_table: SemanticTable,
     joined_flow: SemanticFlow,
@@ -149,12 +139,12 @@ def joined_flow_handle(
     return FlowHandle.from_parts(
         tables=[orders_table, customers_table],
         flows=[joined_flow],
-        data_sources=[DataSource.duckdb(str(seeded_db), name="test_db")],
+        data_sources=[seeded_datasource],
     )
 
 
 @pytest.fixture
-def flow_yaml_dir(seeded_db: Path, tmp_path: Path) -> Path:
+def flow_yaml_dir(tmp_path: Path) -> Path:
     """Create a directory with YAML flow definitions."""
     flow_dir = tmp_path / "flows"
     tables_dir = flow_dir / "tables"

@@ -11,8 +11,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-import duckdb
-
 from semaflow import DataSource, FlowHandle
 
 
