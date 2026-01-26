@@ -16,41 +16,14 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Faster incremental builds
+  CARGO_INCREMENTAL: 0
+  # Share build artifacts across jobs
+  RUSTC_WRAPPER: ""
 
 jobs:
   # ============================================================================
-  # Rust Tests
-  # ============================================================================
-  rust-test:
-    name: Rust Tests (${{ matrix.features }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        features: [default, postgres, all-backends]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.features }}-
-            ${{ runner.os }}-cargo-
-
-      - name: Run tests
-        run: cargo test --features ${{ matrix.features }} --verbose
-
-  # ============================================================================
-  # Rust Linting
+  # Rust Linting (fast, runs first)
   # ============================================================================
   rust-lint:
     name: Rust Lint & Format
@@ -63,6 +36,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "lint"
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -70,17 +48,42 @@ jobs:
         run: cargo clippy --features all-backends -- -D warnings
 
   # ============================================================================
-  # Python Tests
+  # Rust Tests (single build with all features)
   # ============================================================================
-  python-test:
-    name: Python Tests
+  rust-test:
+    name: Rust Tests
     runs-on: ubuntu-latest
-    needs: [rust-test, rust-lint]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "test"
+
+      - name: Run tests
+        run: cargo test --features all-backends --verbose
+
+  # ============================================================================
+  # Python Tests (reuse cached Rust build)
+  # ============================================================================
+  python-test:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    needs: [rust-lint]  # Only wait for lint, run in parallel with rust-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "python"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
@@ -90,27 +93,39 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+
       - name: Install dependencies
         run: uv sync --extra dev --extra api
 
-      - name: Build Python bindings
-        run: uv run maturin develop --features python,all-backends
+      - name: Build Python bindings (release for speed)
+        run: uv run maturin develop --release --features python,all-backends
 
       - name: Run Python tests
         run: uv run pytest tests/ -v --tb=short
 
   # ============================================================================
-  # Coverage
+  # Coverage (only on main, not PRs - it's slow)
   # ============================================================================
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
-    needs: [rust-test]
+    if: github.ref == 'refs/heads/main'
+    needs: [rust-test, python-test]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "coverage"
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
