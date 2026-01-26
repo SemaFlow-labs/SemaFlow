@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use arrow::array::RecordBatch;
+use arrow::datatypes::{DataType, Schema};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 
@@ -23,6 +25,8 @@ pub struct DuckDbConnection {
     dialect: DuckDbDialect,
     limiter: Arc<Semaphore>,
     pool: Arc<Mutex<Vec<duckdb::Connection>>>,
+    /// Whether this is an in-memory database (connections cannot be recreated)
+    is_memory: bool,
 }
 
 impl DuckDbConnection {
@@ -33,9 +37,11 @@ impl DuckDbConnection {
     /// Create a DuckDB connection with configuration.
     pub fn with_config<P: AsRef<Path>>(path: P, config: DuckDbConfig) -> Self {
         let path = path.as_ref().to_path_buf();
+        let is_memory = path.to_str() == Some(":memory:");
         tracing::info!(
             path = %path.display(),
             max_concurrency = config.max_concurrency,
+            is_memory = is_memory,
             "creating DuckDB connection"
         );
         Self {
@@ -43,6 +49,7 @@ impl DuckDbConnection {
             dialect: DuckDbDialect,
             limiter: Arc::new(Semaphore::new(config.max_concurrency)),
             pool: Arc::new(Mutex::new(Vec::new())),
+            is_memory,
         }
     }
 
@@ -54,6 +61,22 @@ impl DuckDbConnection {
         );
         self.limiter = Arc::new(Semaphore::new(max_in_flight));
         self
+    }
+
+    /// Initialize the connection pool with one connection.
+    ///
+    /// For in-memory databases, this MUST be called before any queries,
+    /// as new connections cannot be created (they would be empty databases).
+    pub async fn initialize_pool(&self) -> Result<()> {
+        let conn = duckdb::Connection::open(self.database_path.clone())
+            .map_err(|e| SemaflowError::Execution(format!("open duckdb: {e}")))?;
+        let mut guard = self.pool.lock().await;
+        guard.push(conn);
+        tracing::debug!(
+            path = %self.database_path.display(),
+            "initialized DuckDB connection pool"
+        );
+        Ok(())
     }
 
     async fn acquire_slot(&self) -> Result<SemaphorePermit<'_>> {
@@ -68,20 +91,157 @@ impl DuckDbConnection {
     }
 
     async fn checkout_connection(&self) -> Result<duckdb::Connection> {
-        let mut guard = self.pool.lock().await;
-        if let Some(conn) = guard.pop() {
-            let pool_size = guard.len();
-            drop(guard);
-            tracing::trace!(
-                pool_remaining = pool_size,
-                "reusing pooled DuckDB connection"
-            );
-            return Ok(conn);
+        // Try to get a connection from the pool first
+        {
+            let mut guard = self.pool.lock().await;
+            if let Some(conn) = guard.pop() {
+                let pool_size = guard.len();
+                drop(guard);
+                tracing::trace!(
+                    pool_remaining = pool_size,
+                    "reusing pooled DuckDB connection"
+                );
+                return Ok(conn);
+            }
         }
-        drop(guard);
+
+        // Pool is empty - for in-memory databases, we need to wait for one
+        // since opening a new :memory: connection creates a separate empty database.
+        if self.is_memory {
+            // This should only happen during concurrent access after pool was initialized.
+            // If we get here before initialization, we have a bug.
+            tracing::debug!("waiting for in-memory DuckDB connection to be returned to pool");
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                let mut guard = self.pool.lock().await;
+                if let Some(conn) = guard.pop() {
+                    tracing::trace!("got in-memory DuckDB connection from pool");
+                    return Ok(conn);
+                }
+            }
+        }
+
+        // For file-based databases, open a new connection
         tracing::debug!(path = %self.database_path.display(), "opening new DuckDB connection");
         duckdb::Connection::open(self.database_path.clone())
             .map_err(|e| SemaflowError::Execution(format!("open duckdb: {e}")))
+    }
+
+    /// Get a connection from pool, or create one if pool is empty.
+    ///
+    /// Unlike `checkout_connection`, this will create a new connection if needed,
+    /// which is correct for initial setup (like register_arrow_table) but NOT for
+    /// queries on in-memory databases (where we must reuse the existing connection).
+    async fn get_or_create_connection(&self) -> Result<duckdb::Connection> {
+        {
+            let mut guard = self.pool.lock().await;
+            if let Some(conn) = guard.pop() {
+                tracing::trace!("reusing pooled DuckDB connection for registration");
+                return Ok(conn);
+            }
+        }
+        // Create new connection - this is OK for initial setup
+        tracing::debug!(path = %self.database_path.display(), "creating initial DuckDB connection");
+        duckdb::Connection::open(self.database_path.clone())
+            .map_err(|e| SemaflowError::Execution(format!("open duckdb: {e}")))
+    }
+
+    /// Register an Arrow table in DuckDB by creating a table from schema and appending batches.
+    ///
+    /// This enables zero-copy registration of DataFrames (pandas/polars) passed as Arrow.
+    pub async fn register_arrow_table(
+        &self,
+        table_name: &str,
+        schema: &Schema,
+        batches: Vec<RecordBatch>,
+    ) -> Result<()> {
+        let table_name = table_name.to_string();
+        let schema = schema.clone();
+        // Use get_or_create since this might be the first call (pool empty)
+        let conn = self.get_or_create_connection().await?;
+        let pool = self.pool.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<duckdb::Connection> {
+            let start = Instant::now();
+
+            // Generate CREATE TABLE statement from Arrow schema
+            let create_sql = arrow_schema_to_create_table(&table_name, &schema);
+            tracing::debug!(sql = %create_sql, "creating table from Arrow schema");
+            conn.execute(&create_sql, [])
+                .map_err(|e| SemaflowError::Execution(format!("create table: {e}")))?;
+
+            // Append all record batches using DuckDB's Arrow appender
+            {
+                let mut appender = conn
+                    .appender(&table_name)
+                    .map_err(|e| SemaflowError::Execution(format!("create appender: {e}")))?;
+
+                for batch in batches {
+                    appender
+                        .append_record_batch(batch)
+                        .map_err(|e| SemaflowError::Execution(format!("append batch: {e}")))?;
+                }
+            }
+
+            let elapsed = start.elapsed();
+            tracing::debug!(
+                table = table_name.as_str(),
+                ms = elapsed.as_millis(),
+                "registered Arrow table in DuckDB"
+            );
+
+            Ok(conn)
+        })
+        .await
+        .map_err(|e| SemaflowError::Execution(format!("task join error: {e}")))?;
+
+        let conn = result?;
+        {
+            let mut guard = pool.lock().await;
+            guard.push(conn);
+        }
+        Ok(())
+    }
+}
+
+/// Convert Arrow schema to DuckDB CREATE TABLE statement.
+fn arrow_schema_to_create_table(table_name: &str, schema: &Schema) -> String {
+    let columns: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let duck_type = arrow_type_to_duckdb(f.data_type());
+            format!("\"{}\" {}", f.name(), duck_type)
+        })
+        .collect();
+
+    format!("CREATE TABLE \"{}\" ({})", table_name, columns.join(", "))
+}
+
+/// Map Arrow data types to DuckDB types.
+fn arrow_type_to_duckdb(dt: &DataType) -> &'static str {
+    match dt {
+        DataType::Boolean => "BOOLEAN",
+        DataType::Int8 => "TINYINT",
+        DataType::Int16 => "SMALLINT",
+        DataType::Int32 => "INTEGER",
+        DataType::Int64 => "BIGINT",
+        DataType::UInt8 => "UTINYINT",
+        DataType::UInt16 => "USMALLINT",
+        DataType::UInt32 => "UINTEGER",
+        DataType::UInt64 => "UBIGINT",
+        DataType::Float16 | DataType::Float32 => "FLOAT",
+        DataType::Float64 => "DOUBLE",
+        DataType::Utf8 | DataType::LargeUtf8 => "VARCHAR",
+        DataType::Binary | DataType::LargeBinary => "BLOB",
+        DataType::Date32 | DataType::Date64 => "DATE",
+        DataType::Time32(_) | DataType::Time64(_) => "TIME",
+        DataType::Timestamp(_, _) => "TIMESTAMP",
+        DataType::Interval(_) => "INTERVAL",
+        DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => "DECIMAL",
+        DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => "VARCHAR", // fallback
+        DataType::Struct(_) => "VARCHAR", // fallback
+        _ => "VARCHAR",                   // safe fallback for unknown types
     }
 }
 

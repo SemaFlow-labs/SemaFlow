@@ -1,12 +1,12 @@
 [project]
 name = "semaflow"
-version = "0.1.1"
+version = "0.1.2"
 description = "Semantic layer for analytical databases"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
 authors = [
-    { name = "Jack Hart" }
+    { name = "JCart97" }
 ]
 keywords = ["semantic-layer", "analytics", "sql", "duckdb", "bigquery", "postgres"]
 classifiers = [
@@ -22,28 +22,30 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/JCart97/semaflow"
-Repository = "https://github.com/JCart97/semaflow"
+Homepage = "https://github.com/SemaFlow-labs/SemaFlow"
+Repository = "https://github.com/SemaFlow-labs/SemaFlow"
 
 [project.optional-dependencies]
 # Python package extras (install-time dependencies)
 # Note: DuckDB/PostgreSQL backends are Rust features (compile-time)
 # These extras are for Python-side tooling
-duckdb = ["duckdb>=0.10.2"]  # Python DuckDB driver for seeding/testing
+arrow = ["pyarrow>=14.0.0"]  # For register_dataframe() with pandas/polars
 api = ["fastapi[standard]>=0.122.0", "uvicorn[standard]>=0.23.0", "orjson>=3.9.0"]
 dev = [
-    "duckdb>=0.10.2",
+    "pyarrow>=14.0.0",
+    "pandas>=2.0.0",
     "maturin>=1.10.2",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
 ]
-all = ["semaflow[duckdb,api,dev]"]
+all = ["semaflow[arrow,api,dev]"]
 
 [dependency-groups]
 dev = [
     "maturin>=1.10.2",
-    "duckdb>=0.10.2",
+    "pyarrow>=14.0.0",
+    "pandas>=2.0.0",
 ]
 
 [build-system]

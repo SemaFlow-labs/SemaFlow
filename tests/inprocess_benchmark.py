@@ -1,8 +1,9 @@
 """
 Benchmark FlowHandle.execute without HTTP/Pydantic overhead.
 
-This seeds the DuckDB demo data, builds the flow handle from examples/flows,
-and issues repeated execute calls directly against the Rust extension.
+This seeds DuckDB demo data using register_dataframe(), builds the flow handle
+from examples/flows, and issues repeated execute calls directly against the
+Rust extension.
 """
 
 import argparse
@@ -11,68 +12,48 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-import duckdb
+import pandas as pd
+import pyarrow as pa
 
 from semaflow import DataSource, FlowHandle
 
 
-def seed_duckdb(db_path: Path) -> None:
-    """Create test tables matching the shared flows schema."""
-    if db_path.exists():
-        db_path.unlink()
-    conn = duckdb.connect(str(db_path))
-    conn.execute(
-        """
-        -- Dimension: customers
-        CREATE TABLE dim_customers (
-            customer_id INTEGER PRIMARY KEY,
-            country VARCHAR,
-            email VARCHAR,
-            signup_date DATE
-        );
+def create_seeded_datasource() -> DataSource:
+    """Create in-memory DuckDB with test data matching the shared flows schema."""
+    ds = DataSource.duckdb(":memory:", name="warehouse")
 
-        -- Dimension: products
-        CREATE TABLE dim_products (
-            product_id INTEGER PRIMARY KEY,
-            product_name VARCHAR,
-            category VARCHAR,
-            price DOUBLE
-        );
+    # Dimension: customers
+    customers_df = pd.DataFrame({
+        "customer_id": [1, 2, 3],
+        "country": ["US", "UK", "US"],
+        "email": ["alice@example.com", "bob@example.com", "carla@example.com"],
+        "signup_date": pd.to_datetime(["2023-01-01", "2023-02-15", "2023-03-10"]),
+    })
+    ds.register_dataframe("dim_customers", pa.Table.from_pandas(customers_df).to_reader())
 
-        -- Fact: orders
-        CREATE TABLE fct_orders (
-            order_id INTEGER PRIMARY KEY,
-            customer_id INTEGER,
-            product_id INTEGER,
-            order_date DATE,
-            status VARCHAR,
-            quantity INTEGER,
-            total_amount DOUBLE,
-            unit_price DOUBLE
-        );
+    # Dimension: products
+    products_df = pd.DataFrame({
+        "product_id": [1, 2, 3],
+        "product_name": ["Widget", "Gadget", "Gizmo"],
+        "category": ["Electronics", "Electronics", "Home"],
+        "price": [29.99, 49.99, 19.99],
+    })
+    ds.register_dataframe("dim_products", pa.Table.from_pandas(products_df).to_reader())
 
-        -- Seed customers
-        INSERT INTO dim_customers VALUES
-            (1, 'US', 'alice@example.com', '2023-01-01'),
-            (2, 'UK', 'bob@example.com', '2023-02-15'),
-            (3, 'US', 'carla@example.com', '2023-03-10');
+    # Fact: orders
+    orders_df = pd.DataFrame({
+        "order_id": [1, 2, 3, 4, 5],
+        "customer_id": [1, 1, 2, 2, 3],
+        "product_id": [1, 2, 1, 3, 2],
+        "order_date": pd.to_datetime(["2023-06-01", "2023-06-02", "2023-06-03", "2023-06-04", "2023-06-05"]),
+        "status": ["completed", "completed", "completed", "pending", "completed"],
+        "quantity": [2, 1, 3, 1, 2],
+        "total_amount": [59.98, 49.99, 89.97, 19.99, 99.98],
+        "unit_price": [29.99, 49.99, 29.99, 19.99, 49.99],
+    })
+    ds.register_dataframe("fct_orders", pa.Table.from_pandas(orders_df).to_reader())
 
-        -- Seed products
-        INSERT INTO dim_products VALUES
-            (1, 'Widget', 'Electronics', 29.99),
-            (2, 'Gadget', 'Electronics', 49.99),
-            (3, 'Gizmo', 'Home', 19.99);
-
-        -- Seed orders
-        INSERT INTO fct_orders VALUES
-            (1, 1, 1, '2023-06-01', 'completed', 2, 59.98, 29.99),
-            (2, 1, 2, '2023-06-02', 'completed', 1, 49.99, 49.99),
-            (3, 2, 1, '2023-06-03', 'completed', 3, 89.97, 29.99),
-            (4, 2, 3, '2023-06-04', 'pending', 1, 19.99, 19.99),
-            (5, 3, 2, '2023-06-05', 'completed', 2, 99.98, 49.99);
-        """
-    )
-    conn.close()
+    return ds
 
 
 REQUEST: Dict[str, Any] = {
@@ -116,11 +97,12 @@ async def main():
 
     project_root = Path(__file__).resolve().parents[1]
     flow_root = project_root / "examples" / "flows"
-    db_path = project_root / "examples" / "duckdb" / "benchmark.duckdb"
-    seed_duckdb(db_path)
+
+    # Create in-memory datasource with test data
+    ds = create_seeded_datasource()
 
     # Use "warehouse" to match the shared flows' data_source field
-    flow = FlowHandle.from_dir(flow_root, [DataSource.duckdb(str(db_path), name="warehouse")])
+    flow = FlowHandle.from_dir(flow_root, [ds])
 
     total_requests = args.iterations * args.concurrency
     print(f"Running {total_requests} execute calls (concurrency={args.concurrency})...")

@@ -35,13 +35,88 @@ ds = DataSource.duckdb("path/to/database.duckdb", name="my_db")
 
 ### In-Memory Databases
 
-⚠️ **Limitation**: `DataSource.duckdb(":memory:")` creates an **empty, isolated** database.
+```python
+ds = DataSource.duckdb(":memory:", name="mem_db")
+```
+
+In-memory databases are ideal for **testing**, **interactive exploration**, and
+**dynamic data workflows** where you want to query DataFrames through SemaFlow's
+semantic layer.
+
+#### Registering DataFrames (Recommended)
+
+Use `register_dataframe()` to populate in-memory databases with pandas, polars, or
+any Arrow-compatible data:
+
+```python
+import pyarrow as pa
+import pandas as pd
+from semaflow import DataSource, SemanticTable, SemanticFlow, FlowHandle, Dimension, Measure
+
+# Create in-memory datasource
+ds = DataSource.duckdb(":memory:", name="test")
+
+# Create and register a DataFrame
+df = pd.DataFrame({
+    "order_id": [1, 2, 3],
+    "amount": [100.0, 200.0, 150.0],
+    "status": ["complete", "pending", "complete"]
+})
+
+# Register as Arrow (zero-copy transfer)
+ds.register_dataframe("orders", pa.Table.from_pandas(df).to_reader())
+
+# Define semantic layer
+orders = SemanticTable(
+    name="orders",
+    data_source=ds,
+    table="orders",
+    primary_key="order_id",
+    dimensions={"status": Dimension("status")},
+    measures={"total": Measure("amount", "sum")}
+)
+
+flow = SemanticFlow(name="sales", base_table=orders, base_table_alias="o")
+handle = FlowHandle.from_parts([orders], [flow], [ds])
+
+# Query through semantic layer
+result = await handle.execute({
+    "flow": "sales",
+    "dimensions": ["o.status"],
+    "measures": ["o.total"]
+})
+# [{"o.status": "complete", "o.total": 250.0}, {"o.status": "pending", "o.total": 200.0}]
+```
+
+**Key points**:
+- Pass data as a PyArrow `RecordBatchReader` (use `.to_reader()` on PyArrow Tables)
+- Works with **pandas** (`pa.Table.from_pandas(df).to_reader()`)
+- Works with **polars** (`df.to_arrow().to_reader()`)
+- Works with any **Arrow-compatible library**
+- Uses Arrow's C Data Interface for **zero-copy** data transfer
+- You can register multiple tables on the same datasource
+
+#### Why Not Python's duckdb Package?
+
+⚠️ You **cannot** pre-populate an in-memory database using Python's `duckdb` package
+and then query it via SemaFlow:
+
+```python
+import duckdb
+
+# This WON'T work - separate library instances!
+conn = duckdb.connect(":memory:")
+conn.execute("CREATE TABLE orders ...")
+conn.close()
+
+ds = DataSource.duckdb(":memory:")  # This is a DIFFERENT empty database
+```
 
 This is because SemaFlow's Rust backend and Python's `duckdb` package link separate
-DuckDB libraries. They cannot share in-memory databases, even with named databases
-like `:memory:mydb`.
+DuckDB libraries. Named in-memory databases (`:memory:mydb`) also don't share across
+library instances.
 
-**Workaround for testing**: Use a temporary file instead:
+**Alternative - Temp File**: If you need to use Python's `duckdb` package directly:
 
 ```python
 import tempfile
@@ -60,8 +135,6 @@ conn.close()
 # Now use with semaflow
 ds = DataSource.duckdb(db_path, name="test")
 ```
-
-> **Future**: We're exploring ways to support true in-memory databases.
 
 **Functions**:
 | Category | Functions |

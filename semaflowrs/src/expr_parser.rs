@@ -84,7 +84,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_string(&mut self) -> Result<String, SemaflowError> {
-        let quote = self.advance().unwrap(); // consume opening quote
+        // Caller guarantees we're positioned at a quote character
+        let quote = self
+            .advance()
+            .ok_or_else(|| SemaflowError::Validation("unexpected end of input".to_string()))?;
         let start = self.pos;
         while let Some(c) = self.peek_char() {
             if c == quote {

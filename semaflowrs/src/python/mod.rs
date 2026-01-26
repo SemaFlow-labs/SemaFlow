@@ -15,6 +15,8 @@ use crate::{
     validation::Validator,
     QueryRequest, SemaflowError,
 };
+#[cfg(feature = "duckdb")]
+use arrow::array::RecordBatchReader;
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -49,7 +51,7 @@ fn to_validation_err<E: std::fmt::Display>(msg: E) -> PyErr {
 }
 
 fn dumps(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<String> {
-    let json = py.import_bound("json")?;
+    let json = py.import("json")?;
     json.call_method1("dumps", (obj,))?.extract()
 }
 
@@ -124,6 +126,11 @@ pub struct PyDataSource {
     pub backend_type: String,
     #[pyo3(get)]
     pub schema: Option<String>,
+
+    /// Pre-created DuckDB connection (used when register_dataframe is called).
+    /// This allows the connection to be reused in build_data_sources().
+    #[cfg(feature = "duckdb")]
+    pub(crate) duckdb_conn: Option<Arc<DuckDbConnection>>,
 }
 
 #[pymethods]
@@ -137,15 +144,18 @@ impl PyDataSource {
             max_concurrency,
             backend_type: "duckdb".to_string(),
             schema: None,
+            #[cfg(feature = "duckdb")]
+            duckdb_conn: None,
         }
     }
 
     /// Create a DuckDB data source.
     ///
     /// Args:
-    ///     path: Path to DuckDB database file. Note: `:memory:` is NOT supported
-    ///           for pre-populated databases because Python and Rust use separate
-    ///           DuckDB library instances. Use a file path instead.
+    ///     path: Path to DuckDB database file, or `:memory:` for an in-memory database.
+    ///           Note: In-memory databases cannot be shared with Python's `duckdb` package
+    ///           since they use separate library instances. Use a file path if you need
+    ///           to pre-populate data with Python duckdb before querying via SemaFlow.
     ///     name: Optional data source name (defaults to "duckdb")
     ///     max_concurrency: Optional max concurrent queries
     #[staticmethod]
@@ -157,6 +167,8 @@ impl PyDataSource {
             max_concurrency,
             backend_type: "duckdb".to_string(),
             schema: None,
+            #[cfg(feature = "duckdb")]
+            duckdb_conn: None,
         }
     }
 
@@ -181,6 +193,8 @@ impl PyDataSource {
             max_concurrency,
             backend_type: "postgres".to_string(),
             schema: Some(schema),
+            #[cfg(feature = "duckdb")]
+            duckdb_conn: None,
         }
     }
 
@@ -211,6 +225,8 @@ impl PyDataSource {
             max_concurrency: None,
             backend_type: "bigquery".to_string(),
             schema: Some(dataset),
+            #[cfg(feature = "duckdb")]
+            duckdb_conn: None,
         }
     }
 
@@ -219,6 +235,66 @@ impl PyDataSource {
             data_source: self.name.clone(),
             table: name,
         }
+    }
+
+    /// Register a DataFrame (passed as Arrow) as a table in this data source.
+    ///
+    /// This method enables in-memory DuckDB databases to be populated with data
+    /// from pandas, polars, or any Arrow-compatible library via zero-copy.
+    ///
+    /// Args:
+    ///     table_name: Name for the table in the database
+    ///     data: Arrow RecordBatchReader (e.g., `pa.Table.from_pandas(df).to_reader()`)
+    ///
+    /// Example:
+    ///     ```python
+    ///     import pyarrow as pa
+    ///     ds = DataSource.duckdb(":memory:", name="test")
+    ///     df = pd.DataFrame({"id": [1, 2], "amount": [100.0, 200.0]})
+    ///     ds.register_dataframe("orders", pa.Table.from_pandas(df).to_reader())
+    ///     ```
+    #[cfg(feature = "duckdb")]
+    #[pyo3(signature = (table_name, data))]
+    fn register_dataframe(
+        &mut self,
+        table_name: String,
+        data: arrow::pyarrow::PyArrowType<arrow::ffi_stream::ArrowArrayStreamReader>,
+    ) -> PyResult<()> {
+        use crate::config::DuckDbConfig;
+
+        // Ensure this is a DuckDB data source
+        if self.backend_type != "duckdb" {
+            return Err(PyValueError::new_err(
+                "register_dataframe is only supported for DuckDB data sources",
+            ));
+        }
+
+        // Get or create connection eagerly
+        let conn = match &self.duckdb_conn {
+            Some(c) => c.clone(),
+            None => {
+                let config = DuckDbConfig {
+                    max_concurrency: self.max_concurrency.unwrap_or(4),
+                };
+                let new_conn = Arc::new(DuckDbConnection::with_config(&self.uri, config));
+                self.duckdb_conn = Some(new_conn.clone());
+                new_conn
+            }
+        };
+
+        // Extract Arrow reader and collect batches
+        let reader = data.0;
+        let schema = reader.schema();
+        let batches: Vec<arrow::array::RecordBatch> = reader
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| PyRuntimeError::new_err(format!("failed to read Arrow batches: {e}")))?;
+
+        // Register the table
+        runtime()
+            .block_on(conn.register_arrow_table(&table_name, &schema, batches))
+            .map_err(|e| PyRuntimeError::new_err(format!("failed to register table: {e}")))?;
+
+        Ok(())
     }
 }
 
@@ -455,7 +531,7 @@ impl PySemanticTable {
         measures: Option<&Bound<'_, PyAny>>,
         description: Option<String>,
     ) -> PyResult<Self> {
-        let data_source_obj = pyo3::types::PyString::new_bound(py, &table_handle.data_source);
+        let data_source_obj = pyo3::types::PyString::new(py, &table_handle.data_source);
         Self::new(
             py,
             name,
@@ -574,14 +650,26 @@ fn build_data_sources(
             match item.backend_type.as_str() {
                 #[cfg(feature = "duckdb")]
                 "duckdb" => {
-                    // Use max_concurrency from: PyDataSource param > config > default
-                    let duck_config = crate::config::DuckDbConfig {
-                        max_concurrency: item
-                            .max_concurrency
-                            .unwrap_or(resolved.duckdb.max_concurrency),
-                    };
-                    let conn = DuckDbConnection::with_config(item.uri.clone(), duck_config);
-                    ds.insert(item.name.clone(), Arc::new(conn));
+                    // Check if connection was pre-created (via register_dataframe)
+                    if let Some(existing_conn) = item.duckdb_conn.clone() {
+                        tracing::debug!(
+                            name = item.name.as_str(),
+                            "reusing pre-created DuckDB connection"
+                        );
+                        ds.insert(item.name.clone(), existing_conn);
+                    } else {
+                        // Create new connection
+                        let duck_config = crate::config::DuckDbConfig {
+                            max_concurrency: item
+                                .max_concurrency
+                                .unwrap_or(resolved.duckdb.max_concurrency),
+                        };
+                        let conn = DuckDbConnection::with_config(item.uri.clone(), duck_config);
+                        // Initialize pool so checkout_connection works
+                        // (especially important for :memory: databases)
+                        runtime().block_on(conn.initialize_pool()).map_err(py_err)?;
+                        ds.insert(item.name.clone(), Arc::new(conn));
+                    }
                 }
                 #[cfg(not(feature = "duckdb"))]
                 "duckdb" => {
@@ -694,14 +782,14 @@ fn build_data_sources(
 }
 
 fn serde_json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
-    let json = py.import_bound("json")?;
+    let json = py.import("json")?;
     let dumps = json.getattr("dumps")?;
     let loads = json.getattr("loads")?;
     let s: String = dumps
         .call1((serde_json::to_string(value).map_err(py_err)?,))?
         .extract()?;
     let obj = loads.call1((s,))?;
-    Ok(obj.into_py(py))
+    Ok(obj.unbind())
 }
 
 #[pyfunction]
@@ -765,13 +853,13 @@ fn run(
         })
         .map_err(to_validation_err)?;
 
-    let json = py.import_bound("json")?;
+    let json = py.import("json")?;
     let py_obj = json.call_method1("loads", (rows_json,))?;
     tracing::debug!(
         ms = start.elapsed().as_millis(),
         "run (pyfunction) complete"
     );
-    Ok(py_obj.into_py(py))
+    Ok(py_obj.unbind())
 }
 
 /// PyO3 module entrypoint
@@ -1099,14 +1187,14 @@ impl SemanticFlowHandle {
                     })
                 })
                 .map_err(to_validation_err)?;
-            let json = py.import_bound("json")?;
+            let json = py.import("json")?;
             let py_obj = json.call_method1("loads", (result_json,))?;
             tracing::debug!(
                 ms = start.elapsed().as_millis(),
                 paginated = true,
                 "execute complete"
             );
-            Ok(py_obj.into_py(py))
+            Ok(py_obj.unbind())
         } else {
             // Non-paginated execution - return just rows (backwards compatible)
             let rows_json: String = py
@@ -1119,14 +1207,14 @@ impl SemanticFlowHandle {
                     })
                 })
                 .map_err(to_validation_err)?;
-            let json = py.import_bound("json")?;
+            let json = py.import("json")?;
             let py_obj = json.call_method1("loads", (rows_json,))?;
             tracing::debug!(
                 ms = start.elapsed().as_millis(),
                 paginated = false,
                 "execute complete"
             );
-            Ok(py_obj.into_py(py))
+            Ok(py_obj.unbind())
         }
     }
 
@@ -1134,23 +1222,23 @@ impl SemanticFlowHandle {
     #[pyo3(text_signature = "(self)")]
     fn list_flows(&self, py: Python<'_>) -> PyResult<PyObject> {
         let summaries = self.registry.list_flow_summaries();
-        let py_list = PyList::empty_bound(py);
+        let py_list = PyList::empty(py);
         for s in summaries {
-            let dict = PyDict::new_bound(py);
+            let dict = PyDict::new(py);
             dict.set_item("name", s.name)?;
             if let Some(desc) = s.description {
                 dict.set_item("description", desc)?;
             }
             py_list.append(dict)?;
         }
-        Ok(py_list.into_py(py))
+        Ok(py_list.unbind().into())
     }
 
     /// Get flow schema (dimensions, measures, joins) by name.
     #[pyo3(text_signature = "(self, name)")]
     fn get_flow(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
         let schema = self.registry.flow_schema(name).map_err(to_validation_err)?;
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         dict.set_item("name", schema.name)?;
         if let Some(desc) = schema.description {
             dict.set_item("description", desc)?;
@@ -1162,9 +1250,9 @@ impl SemanticFlowHandle {
         if let Some(grain) = schema.smallest_time_grain {
             dict.set_item("smallest_time_grain", grain)?;
         }
-        let dims = PyList::empty_bound(py);
+        let dims = PyList::empty(py);
         for d in schema.dimensions {
-            let dct = PyDict::new_bound(py);
+            let dct = PyDict::new(py);
             dct.set_item("name", d.name)?;
             dct.set_item("qualified_name", d.qualified_name)?;
             if let Some(desc) = d.description {
@@ -1182,9 +1270,9 @@ impl SemanticFlowHandle {
         }
         dict.set_item("dimensions", dims)?;
 
-        let measures = PyList::empty_bound(py);
+        let measures = PyList::empty(py);
         for m in schema.measures {
-            let dct = PyDict::new_bound(py);
+            let dct = PyDict::new(py);
             dct.set_item("name", m.name)?;
             dct.set_item("qualified_name", m.qualified_name)?;
             if let Some(desc) = m.description {
@@ -1203,6 +1291,6 @@ impl SemanticFlowHandle {
         }
         dict.set_item("measures", measures)?;
 
-        Ok(dict.into_py(py))
+        Ok(dict.unbind().into())
     }
 }
