@@ -8,51 +8,44 @@ pure overhead without multi-grain query complexity.
 import argparse
 import asyncio
 import time
-from pathlib import Path
 from typing import Any, Dict, List
+
+import pandas as pd
+import pyarrow as pa
 
 from semaflow import DataSource, FlowHandle
 
 
-def seed_duckdb(db_path: Path) -> None:
-    """Create minimal test tables."""
-    if db_path.exists():
-        db_path.unlink()
-    conn = duckdb.connect(str(db_path))
-    conn.execute(
-        """
-        CREATE TABLE customers (
-            id INTEGER PRIMARY KEY,
-            name VARCHAR,
-            country VARCHAR
-        );
-        CREATE TABLE orders (
-            id INTEGER PRIMARY KEY,
-            customer_id INTEGER,
-            amount DOUBLE,
-            status VARCHAR,
-            created_at TIMESTAMP
-        );
-        INSERT INTO customers VALUES
-            (1, 'Alice', 'US'),
-            (2, 'Bob', 'UK'),
-            (3, 'Carla', 'US');
-        INSERT INTO orders VALUES
-            (1, 1, 100.0, 'completed', '2023-01-01'),
-            (2, 1, 50.0, 'completed', '2023-01-02'),
-            (3, 2, 25.0, 'pending', '2023-01-03');
-        """
-    )
-    conn.close()
+def create_seeded_datasource() -> DataSource:
+    """Create in-memory DuckDB with test data."""
+    ds = DataSource.duckdb(":memory:", name="bench_db")
+
+    customers_df = pd.DataFrame({
+        "id": [1, 2, 3],
+        "name": ["Alice", "Bob", "Carla"],
+        "country": ["US", "UK", "US"],
+    })
+    ds.register_dataframe("customers", pa.Table.from_pandas(customers_df).to_reader())
+
+    orders_df = pd.DataFrame({
+        "id": [1, 2, 3],
+        "customer_id": [1, 1, 2],
+        "amount": [100.0, 50.0, 25.0],
+        "status": ["completed", "completed", "pending"],
+        "created_at": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+    })
+    ds.register_dataframe("orders", pa.Table.from_pandas(orders_df).to_reader())
+
+    return ds
 
 
-def create_flow_handle(db_path: Path) -> FlowHandle:
+def create_flow_handle(ds: DataSource) -> FlowHandle:
     """Create FlowHandle with inline table/flow definitions (no YAML)."""
     from semaflow import Dimension, Measure, SemanticFlow, SemanticTable
 
     orders = SemanticTable(
         name="orders",
-        data_source="bench_db",
+        data_source=ds,
         table="orders",
         primary_key="id",
         dimensions={
@@ -75,7 +68,7 @@ def create_flow_handle(db_path: Path) -> FlowHandle:
     return FlowHandle.from_parts(
         tables=[orders],
         flows=[flow],
-        data_sources=[DataSource.duckdb(str(db_path), name="bench_db")],
+        data_sources=[ds],
     )
 
 
@@ -119,11 +112,8 @@ async def main():
     parser.add_argument("--concurrency", type=int, default=4, help="Number of concurrent workers")
     args = parser.parse_args()
 
-    project_root = Path(__file__).resolve().parents[1]
-    db_path = project_root / "examples" / "duckdb" / "simple_benchmark.duckdb"
-    seed_duckdb(db_path)
-
-    flow = create_flow_handle(db_path)
+    ds = create_seeded_datasource()
+    flow = create_flow_handle(ds)
 
     total_requests = args.iterations * args.concurrency
     print(f"Running {total_requests} execute calls (concurrency={args.concurrency})...")

@@ -25,6 +25,8 @@ pub struct DuckDbConnection {
     dialect: DuckDbDialect,
     limiter: Arc<Semaphore>,
     pool: Arc<Mutex<Vec<duckdb::Connection>>>,
+    /// Whether this is an in-memory database (connections cannot be recreated)
+    is_memory: bool,
 }
 
 impl DuckDbConnection {
@@ -35,9 +37,11 @@ impl DuckDbConnection {
     /// Create a DuckDB connection with configuration.
     pub fn with_config<P: AsRef<Path>>(path: P, config: DuckDbConfig) -> Self {
         let path = path.as_ref().to_path_buf();
+        let is_memory = path.to_str() == Some(":memory:");
         tracing::info!(
             path = %path.display(),
             max_concurrency = config.max_concurrency,
+            is_memory = is_memory,
             "creating DuckDB connection"
         );
         Self {
@@ -45,6 +49,7 @@ impl DuckDbConnection {
             dialect: DuckDbDialect,
             limiter: Arc::new(Semaphore::new(config.max_concurrency)),
             pool: Arc::new(Mutex::new(Vec::new())),
+            is_memory,
         }
     }
 
@@ -56,6 +61,22 @@ impl DuckDbConnection {
         );
         self.limiter = Arc::new(Semaphore::new(max_in_flight));
         self
+    }
+
+    /// Initialize the connection pool with one connection.
+    ///
+    /// For in-memory databases, this MUST be called before any queries,
+    /// as new connections cannot be created (they would be empty databases).
+    pub async fn initialize_pool(&self) -> Result<()> {
+        let conn = duckdb::Connection::open(self.database_path.clone())
+            .map_err(|e| SemaflowError::Execution(format!("open duckdb: {e}")))?;
+        let mut guard = self.pool.lock().await;
+        guard.push(conn);
+        tracing::debug!(
+            path = %self.database_path.display(),
+            "initialized DuckDB connection pool"
+        );
+        Ok(())
     }
 
     async fn acquire_slot(&self) -> Result<SemaphorePermit<'_>> {
@@ -70,18 +91,57 @@ impl DuckDbConnection {
     }
 
     async fn checkout_connection(&self) -> Result<duckdb::Connection> {
-        let mut guard = self.pool.lock().await;
-        if let Some(conn) = guard.pop() {
-            let pool_size = guard.len();
-            drop(guard);
-            tracing::trace!(
-                pool_remaining = pool_size,
-                "reusing pooled DuckDB connection"
-            );
-            return Ok(conn);
+        // Try to get a connection from the pool first
+        {
+            let mut guard = self.pool.lock().await;
+            if let Some(conn) = guard.pop() {
+                let pool_size = guard.len();
+                drop(guard);
+                tracing::trace!(
+                    pool_remaining = pool_size,
+                    "reusing pooled DuckDB connection"
+                );
+                return Ok(conn);
+            }
         }
-        drop(guard);
+
+        // Pool is empty - for in-memory databases, we need to wait for one
+        // since opening a new :memory: connection creates a separate empty database.
+        if self.is_memory {
+            // This should only happen during concurrent access after pool was initialized.
+            // If we get here before initialization, we have a bug.
+            tracing::debug!("waiting for in-memory DuckDB connection to be returned to pool");
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                let mut guard = self.pool.lock().await;
+                if let Some(conn) = guard.pop() {
+                    tracing::trace!("got in-memory DuckDB connection from pool");
+                    return Ok(conn);
+                }
+            }
+        }
+
+        // For file-based databases, open a new connection
         tracing::debug!(path = %self.database_path.display(), "opening new DuckDB connection");
+        duckdb::Connection::open(self.database_path.clone())
+            .map_err(|e| SemaflowError::Execution(format!("open duckdb: {e}")))
+    }
+
+    /// Get a connection from pool, or create one if pool is empty.
+    ///
+    /// Unlike `checkout_connection`, this will create a new connection if needed,
+    /// which is correct for initial setup (like register_arrow_table) but NOT for
+    /// queries on in-memory databases (where we must reuse the existing connection).
+    async fn get_or_create_connection(&self) -> Result<duckdb::Connection> {
+        {
+            let mut guard = self.pool.lock().await;
+            if let Some(conn) = guard.pop() {
+                tracing::trace!("reusing pooled DuckDB connection for registration");
+                return Ok(conn);
+            }
+        }
+        // Create new connection - this is OK for initial setup
+        tracing::debug!(path = %self.database_path.display(), "creating initial DuckDB connection");
         duckdb::Connection::open(self.database_path.clone())
             .map_err(|e| SemaflowError::Execution(format!("open duckdb: {e}")))
     }
@@ -97,7 +157,8 @@ impl DuckDbConnection {
     ) -> Result<()> {
         let table_name = table_name.to_string();
         let schema = schema.clone();
-        let conn = self.checkout_connection().await?;
+        // Use get_or_create since this might be the first call (pool empty)
+        let conn = self.get_or_create_connection().await?;
         let pool = self.pool.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<duckdb::Connection> {

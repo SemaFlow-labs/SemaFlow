@@ -658,13 +658,16 @@ fn build_data_sources(
                         );
                         ds.insert(item.name.clone(), existing_conn);
                     } else {
-                        // Create new connection as before
+                        // Create new connection
                         let duck_config = crate::config::DuckDbConfig {
                             max_concurrency: item
                                 .max_concurrency
                                 .unwrap_or(resolved.duckdb.max_concurrency),
                         };
                         let conn = DuckDbConnection::with_config(item.uri.clone(), duck_config);
+                        // Initialize pool so checkout_connection works
+                        // (especially important for :memory: databases)
+                        runtime().block_on(conn.initialize_pool()).map_err(py_err)?;
                         ds.insert(item.name.clone(), Arc::new(conn));
                     }
                 }
